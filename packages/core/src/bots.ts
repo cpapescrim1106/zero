@@ -64,6 +64,7 @@ export interface BotState {
   mode: BotMode;
   market: string;
   venue: string;
+  scheduleActive?: boolean;
   lastPrice?: string;
   inventoryBase?: string;
   inventoryQuote?: string;

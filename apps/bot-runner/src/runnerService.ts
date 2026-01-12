@@ -9,6 +9,7 @@ import { MarketStateStore } from "./marketState";
 import { Persistence } from "./persistence";
 import { RedisBus } from "./redisBus";
 import { RiskGovernor } from "./riskGovernor";
+import { isScheduleActive } from "./schedule";
 import { buildStrategyRegistry } from "./strategyRegistry";
 
 export class BotRunnerService {
@@ -22,6 +23,7 @@ export class BotRunnerService {
   private persistence: Persistence;
   private lastMarketEventAt = Date.now();
   private heartbeatTimer?: NodeJS.Timeout;
+  private scheduleTimer?: NodeJS.Timeout;
 
   constructor(private config: BotRunnerConfig) {
     this.bus = new RedisBus(config.redisUrl);
@@ -41,12 +43,18 @@ export class BotRunnerService {
     this.heartbeatTimer = setInterval(() => {
       void this.checkHealth();
     }, this.config.heartbeatIntervalMs);
+    this.scheduleTimer = setInterval(() => {
+      void this.refreshSchedules();
+    }, 30000);
     await this.checkHealth();
   }
 
   async stop() {
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
+    }
+    if (this.scheduleTimer) {
+      clearInterval(this.scheduleTimer);
     }
     await this.persistence.close();
     await this.bus.close();
@@ -63,6 +71,7 @@ export class BotRunnerService {
     void this.bus.setCache(CACHE_KEYS.bot(command.botId), result.state);
     void this.persistence.logEvent(result.event);
     void this.persistence.saveBotSnapshot(result.state);
+    void this.applySchedule(command.botId);
   }
 
   private async loadBots() {
@@ -71,6 +80,7 @@ export class BotRunnerService {
       const state = this.bots.setConfig(bot.id, bot.config as BotConfig, bot.status as BotState["status"]);
       await this.bus.setCache(CACHE_KEYS.bot(bot.id), state);
     }
+    await this.refreshSchedules();
   }
 
   private handleMarketEvent(_channel: string, message: string) {
@@ -95,6 +105,13 @@ export class BotRunnerService {
     if (!state || !config || state.status !== "running") {
       return;
     }
+    const scheduleActive = isScheduleActive(config);
+    const scheduleState = this.bots.updateScheduleActive(botId, scheduleActive);
+    await this.bus.setCache(CACHE_KEYS.bot(botId), scheduleState);
+    if (!scheduleActive) {
+      return;
+    }
+
     const market = this.market.get(config.grid.symbol);
     if (!market) {
       return;
@@ -130,6 +147,22 @@ export class BotRunnerService {
 
   private getStrategy(config: BotConfig): Strategy | undefined {
     return this.strategies.get(config.strategyKey);
+  }
+
+  private async refreshSchedules() {
+    for (const botId of this.bots.listBotIds()) {
+      await this.applySchedule(botId);
+    }
+  }
+
+  private async applySchedule(botId: string) {
+    const config = this.bots.getConfig(botId);
+    if (!config || !config.schedule) {
+      return;
+    }
+    const active = isScheduleActive(config);
+    const state = this.bots.updateScheduleActive(botId, active);
+    await this.bus.setCache(CACHE_KEYS.bot(botId), state);
   }
 
   private async checkHealth() {

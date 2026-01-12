@@ -113,6 +113,14 @@ export class BotManager {
     return state;
   }
 
+  updateScheduleActive(botId: string, active: boolean) {
+    const state = this.ensureState(botId);
+    state.scheduleActive = active;
+    state.lastEventAt = new Date().toISOString();
+    this.states.set(botId, state);
+    return state;
+  }
+
   getState(botId: string) {
     return this.states.get(botId);
   }
@@ -142,6 +150,7 @@ export class BotManager {
       mode: config?.mode ?? "static",
       market: config?.market ?? "",
       venue: config?.venue ?? "",
+      scheduleActive: true,
       risk
     };
   }
