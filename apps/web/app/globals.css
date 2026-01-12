@@ -1,0 +1,41 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-bg: #f5f2ed;
+  --color-panel: #ffffff;
+  --color-text: #121826;
+  --color-muted: #667085;
+  --color-accent: #0aa8a8;
+  --color-accent-2: #f97316;
+  --color-border: rgba(18, 24, 38, 0.12);
+  --color-ring: rgba(10, 168, 168, 0.35);
+}
+
+* {
+  border-color: var(--color-border);
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  color: var(--color-text);
+  background:
+    radial-gradient(circle at 10% 10%, rgba(10, 168, 168, 0.12), transparent 55%),
+    radial-gradient(circle at 90% 5%, rgba(249, 115, 22, 0.12), transparent 60%),
+    linear-gradient(180deg, #f7f4ef 0%, #f2efe9 100%);
+}
+
+::selection {
+  background: rgba(10, 168, 168, 0.2);
+}
+
+@layer components {
+  .input {
+    @apply w-full rounded-xl border border-border bg-white/80 px-4 py-2 text-sm text-text shadow-sm outline-none transition focus:border-accent focus:ring-4 focus:ring-ring;
+  }
+}
