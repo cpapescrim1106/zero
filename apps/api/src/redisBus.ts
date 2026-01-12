@@ -6,8 +6,10 @@ import { CHANNELS } from "@zero/core";
 export class RedisBus {
   private pub: Redis;
   private read: Redis;
+  private url: string;
 
   constructor(redisUrl: string) {
+    this.url = redisUrl;
     this.pub = new Redis(redisUrl);
     this.read = new Redis(redisUrl);
   }
@@ -35,5 +37,9 @@ export class RedisBus {
       return null;
     }
     return JSON.parse(raw) as unknown;
+  }
+
+  createSubscriber() {
+    return new Redis(this.url);
   }
 }
