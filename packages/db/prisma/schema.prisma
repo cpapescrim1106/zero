@@ -1,0 +1,158 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Bot {
+  id           String      @id @default(uuid())
+  name         String
+  strategyKey  String
+  venue        String
+  market       String
+  config       Json
+  riskConfig   Json
+  schedule     Json?
+  status       String
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  runs         BotRun[]
+  orders       Order[]
+  snapshots    BotSnapshot[]
+  riskEvents   RiskEvent[]
+
+  @@index([strategyKey])
+  @@index([venue, market])
+  @@index([status])
+}
+
+model BotRun {
+  id             String    @id @default(uuid())
+  botId          String
+  startedAt      DateTime  @default(now())
+  endedAt        DateTime?
+  configSnapshot Json
+  strategyVersion String
+  status         String
+
+  bot            Bot       @relation(fields: [botId], references: [id])
+  orders         Order[]
+  snapshots      BotSnapshot[]
+
+  @@index([botId, startedAt])
+}
+
+model Order {
+  id            String   @id @default(uuid())
+  botId         String
+  runId         String?
+  venue         String
+  market        String
+  externalId    String?
+  clientOrderId String?
+  side          String
+  price         Decimal  @db.Decimal(38, 18)
+  size          Decimal  @db.Decimal(38, 18)
+  status        String
+  placedAt      DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  meta          Json?
+
+  bot           Bot      @relation(fields: [botId], references: [id])
+  run           BotRun?  @relation(fields: [runId], references: [id])
+  fills         Fill[]
+
+  @@index([botId, status])
+  @@index([externalId])
+  @@index([clientOrderId])
+}
+
+model Fill {
+  id          String   @id @default(uuid())
+  orderId     String
+  venue       String
+  txSig       String
+  qty         Decimal  @db.Decimal(38, 18)
+  price       Decimal  @db.Decimal(38, 18)
+  fees        Decimal? @db.Decimal(38, 18)
+  realizedPnl Decimal? @db.Decimal(38, 18)
+  filledAt    DateTime @default(now())
+  meta        Json?
+
+  order       Order    @relation(fields: [orderId], references: [id])
+
+  @@index([orderId])
+  @@index([txSig])
+}
+
+model PositionSnapshot {
+  id       String   @id @default(uuid())
+  botId    String?
+  market   String
+  baseQty  Decimal  @db.Decimal(38, 18)
+  quoteQty Decimal  @db.Decimal(38, 18)
+  ts       DateTime @default(now())
+  source   String
+  meta     Json?
+
+  @@index([botId, ts])
+  @@index([market, ts])
+}
+
+model EventLog {
+  id       String   @id @default(uuid())
+  version  String
+  kind     String
+  ts       DateTime @default(now())
+  botId    String?
+  source   String
+  payload  Json
+
+  @@index([botId, ts])
+  @@index([kind, ts])
+}
+
+model BotSnapshot {
+  id           String   @id @default(uuid())
+  botId        String
+  runId        String?
+  ts           DateTime @default(now())
+  state        Json
+  equity       Decimal? @db.Decimal(38, 18)
+  pnlRealized  Decimal? @db.Decimal(38, 18)
+  pnlUnrealized Decimal? @db.Decimal(38, 18)
+
+  bot          Bot      @relation(fields: [botId], references: [id])
+  run          BotRun?  @relation(fields: [runId], references: [id])
+
+  @@index([botId, ts])
+}
+
+model AccountSnapshot {
+  id          String   @id @default(uuid())
+  walletId    String
+  ts          DateTime @default(now())
+  equity      Decimal? @db.Decimal(38, 18)
+  balances    Json
+  pnlRealized Decimal? @db.Decimal(38, 18)
+  pnlUnrealized Decimal? @db.Decimal(38, 18)
+
+  @@index([walletId, ts])
+}
+
+model RiskEvent {
+  id       String   @id @default(uuid())
+  botId    String
+  ts       DateTime @default(now())
+  reason   String
+  action   String
+  context  Json?
+
+  bot      Bot      @relation(fields: [botId], references: [id])
+
+  @@index([botId, ts])
+}

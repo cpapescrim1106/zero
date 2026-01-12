@@ -1,0 +1,16 @@
+{
+  "name": "zero",
+  "private": true,
+  "packageManager": "pnpm@9.0.0",
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.15",
+    "turbo": "^2.0.6",
+    "typescript": "^5.5.4"
+  }
+}

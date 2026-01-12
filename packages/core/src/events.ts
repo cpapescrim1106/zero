@@ -1,0 +1,111 @@
+export type EventVersion = "v1";
+
+export type EventKind =
+  | "price"
+  | "balance"
+  | "wallet_tx"
+  | "order"
+  | "fill"
+  | "bot"
+  | "risk"
+  | "health";
+
+export type EventSource = "helius" | "rpc" | "jupiter" | "internal";
+
+export interface BaseEvent {
+  id: string;
+  version: EventVersion;
+  kind: EventKind;
+  ts: string; // ISO timestamp
+  source: EventSource;
+  botId?: string;
+  correlationId?: string;
+}
+
+export interface PriceEvent extends BaseEvent {
+  kind: "price";
+  symbol: string;
+  price: string; // decimal string
+  bid?: string;
+  ask?: string;
+  slot?: number;
+}
+
+export interface BalanceEvent extends BaseEvent {
+  kind: "balance";
+  walletId: string;
+  tokenMint: string;
+  balance: string; // decimal string
+  delta?: string; // decimal string
+  slot?: number;
+}
+
+export interface WalletTxEvent extends BaseEvent {
+  kind: "wallet_tx";
+  walletId: string;
+  signature: string;
+  status: "confirmed" | "finalized" | "failed";
+  slot?: number;
+}
+
+export interface OrderEvent extends BaseEvent {
+  kind: "order";
+  orderId: string;
+  venue: string;
+  externalId?: string;
+  side: "buy" | "sell";
+  price: string;
+  size: string;
+  status: "new" | "open" | "partial" | "filled" | "canceled" | "rejected";
+}
+
+export interface FillEvent extends BaseEvent {
+  kind: "fill";
+  orderId: string;
+  venue: string;
+  externalId?: string;
+  side: "buy" | "sell";
+  price: string;
+  qty: string;
+  fee?: string;
+  realizedPnl?: string;
+  txSig?: string;
+}
+
+export interface BotEvent extends BaseEvent {
+  kind: "bot";
+  botId: string;
+  status: "starting" | "running" | "paused" | "stopped" | "error";
+  message?: string;
+}
+
+export interface RiskEvent extends BaseEvent {
+  kind: "risk";
+  botId: string;
+  reason:
+    | "max_notional"
+    | "max_base_inventory"
+    | "max_daily_loss"
+    | "max_slippage"
+    | "stale_market_data"
+    | "manual_pause";
+  action: "reduce_only" | "shrink" | "pause";
+  context?: Record<string, unknown>;
+}
+
+export interface HealthEvent extends BaseEvent {
+  kind: "health";
+  service: "api" | "web" | "market-data" | "bot-runner";
+  status: "ok" | "degraded" | "down";
+  message?: string;
+}
+
+export type NormalizedEvent =
+  | PriceEvent
+  | BalanceEvent
+  | WalletTxEvent
+  | OrderEvent
+  | FillEvent
+  | BotEvent
+  | RiskEvent
+  | HealthEvent;
