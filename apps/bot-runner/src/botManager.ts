@@ -25,12 +25,10 @@ export class BotManager {
     switch (command.action) {
       case "start":
         status = "running";
-        state.runId = state.runId ?? randomUUID();
         message = "bot started";
         break;
       case "stop":
         status = "stopped";
-        state.runId = undefined;
         message = "bot stopped";
         break;
       case "pause":
@@ -116,6 +114,14 @@ export class BotManager {
   updateScheduleActive(botId: string, active: boolean) {
     const state = this.ensureState(botId);
     state.scheduleActive = active;
+    state.lastEventAt = new Date().toISOString();
+    this.states.set(botId, state);
+    return state;
+  }
+
+  setRunId(botId: string, runId?: string) {
+    const state = this.ensureState(botId);
+    state.runId = runId;
     state.lastEventAt = new Date().toISOString();
     this.states.set(botId, state);
     return state;

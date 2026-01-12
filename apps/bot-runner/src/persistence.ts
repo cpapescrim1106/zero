@@ -1,5 +1,6 @@
+import { randomUUID } from "crypto";
 import { PrismaClient } from "@zero/db";
-import type { BotState, NormalizedEvent } from "@zero/core";
+import type { BotConfig, BotState, NormalizedEvent } from "@zero/core";
 
 export class Persistence {
   private prisma?: PrismaClient;
@@ -58,5 +59,33 @@ export class Persistence {
       return [];
     }
     return this.prisma.bot.findMany();
+  }
+
+  async startBotRun(botId: string, config: BotConfig, strategyVersion: string) {
+    if (!this.prisma) {
+      return randomUUID();
+    }
+    const run = await this.prisma.botRun.create({
+      data: {
+        botId,
+        configSnapshot: config as unknown as object,
+        strategyVersion,
+        status: "running"
+      }
+    });
+    return run.id;
+  }
+
+  async endBotRun(runId: string, status: string) {
+    if (!this.prisma) {
+      return;
+    }
+    await this.prisma.botRun.update({
+      where: { id: runId },
+      data: {
+        endedAt: new Date(),
+        status
+      }
+    });
   }
 }

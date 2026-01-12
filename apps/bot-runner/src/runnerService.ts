@@ -78,9 +78,30 @@ export class BotRunnerService {
 
     const result = this.bots.handleCommand(command);
     void this.bus.publishBotEvent(result.event);
-    void this.bus.setCache(CACHE_KEYS.bot(command.botId), result.state);
     void this.persistence.logEvent(result.event);
-    void this.persistence.saveBotSnapshot(result.state);
+
+    const state = result.state;
+    const config = this.bots.getConfig(command.botId);
+
+    if ((command.action === "start" || command.action === "resume") && config) {
+      void this.persistence
+        .startBotRun(command.botId, config, config.strategyKey)
+        .then((runId) => {
+          const updated = this.bots.setRunId(command.botId, runId);
+          void this.bus.setCache(CACHE_KEYS.bot(command.botId), updated);
+          void this.persistence.saveBotSnapshot(updated);
+        });
+    } else if (command.action === "stop" && state.runId) {
+      void this.persistence.endBotRun(state.runId, "stopped").then(() => {
+        const updated = this.bots.setRunId(command.botId, undefined);
+        void this.bus.setCache(CACHE_KEYS.bot(command.botId), updated);
+        void this.persistence.saveBotSnapshot(updated);
+      });
+    } else {
+      void this.bus.setCache(CACHE_KEYS.bot(command.botId), state);
+      void this.persistence.saveBotSnapshot(state);
+    }
+
     void this.applySchedule(command.botId);
   }
 
