@@ -4,6 +4,7 @@ import { JupiterLimitOrderConnector } from "@zero/connectors";
 import type { Strategy } from "@zero/strategies";
 import type { BotRunnerConfig } from "./config";
 import { BotManager } from "./botManager";
+import { ExecutionEngine } from "./executionEngine";
 import { IntentEngine } from "./intentEngine";
 import { MarketStateStore } from "./marketState";
 import { Persistence } from "./persistence";
@@ -18,12 +19,14 @@ export class BotRunnerService {
   private market = new MarketStateStore();
   private intents = new IntentEngine();
   private risk = new RiskGovernor();
+  private execution: ExecutionEngine;
   private strategies = buildStrategyRegistry();
   private connector: JupiterLimitOrderConnector;
   private persistence: Persistence;
   private lastMarketEventAt = Date.now();
   private heartbeatTimer?: NodeJS.Timeout;
   private scheduleTimer?: NodeJS.Timeout;
+  private reconcileTimer?: NodeJS.Timeout;
 
   constructor(private config: BotRunnerConfig) {
     this.bus = new RedisBus(config.redisUrl);
@@ -31,6 +34,7 @@ export class BotRunnerService {
       apiUrl: config.jupiterApiUrl,
       privateKey: config.solanaPrivateKey
     });
+    this.execution = new ExecutionEngine(this.connector);
     this.persistence = new Persistence(config.databaseUrl, config.persistenceEnabled);
   }
 
@@ -46,6 +50,9 @@ export class BotRunnerService {
     this.scheduleTimer = setInterval(() => {
       void this.refreshSchedules();
     }, 30000);
+    this.reconcileTimer = setInterval(() => {
+      void this.reconcileBots();
+    }, this.config.reconcileIntervalMs);
     await this.checkHealth();
   }
 
@@ -55,6 +62,9 @@ export class BotRunnerService {
     }
     if (this.scheduleTimer) {
       clearInterval(this.scheduleTimer);
+    }
+    if (this.reconcileTimer) {
+      clearInterval(this.reconcileTimer);
     }
     await this.persistence.close();
     await this.bus.close();
@@ -137,11 +147,16 @@ export class BotRunnerService {
       return;
     }
 
-    if (decision.allowedIntents.length > 0) {
-      console.log("[bot-runner] intents ready", {
-        botId,
-        count: decision.allowedIntents.length
-      });
+    if (!this.config.executionEnabled || decision.allowedIntents.length === 0) {
+      return;
+    }
+
+    const execution = await this.execution.execute(botId, decision.allowedIntents);
+    for (const event of execution.events) {
+      if (event.botId) {
+        await this.bus.publishBotEvent(event);
+        await this.persistence.logEvent(event);
+      }
     }
   }
 
@@ -163,6 +178,27 @@ export class BotRunnerService {
     const active = isScheduleActive(config);
     const state = this.bots.updateScheduleActive(botId, active);
     await this.bus.setCache(CACHE_KEYS.bot(botId), state);
+  }
+
+  private async reconcileBots() {
+    if (!this.config.executionEnabled) {
+      return;
+    }
+    for (const botId of this.bots.listBotIds()) {
+      const state = this.bots.getState(botId);
+      const config = this.bots.getConfig(botId);
+      if (!state || !config) {
+        continue;
+      }
+      if (state.status !== "running" || state.scheduleActive === false) {
+        continue;
+      }
+      try {
+        await this.connector.reconcile(config.market);
+      } catch (err) {
+        console.warn("[bot-runner] reconcile failed", { botId, error: (err as Error).message });
+      }
+    }
   }
 
   private async checkHealth() {

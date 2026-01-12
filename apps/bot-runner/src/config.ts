@@ -9,6 +9,7 @@ export interface BotRunnerConfig {
   reconcileIntervalMs: number;
   staleSeconds: number;
   persistenceEnabled: boolean;
+  executionEnabled: boolean;
 }
 
 function required(name: string, value?: string): string {
@@ -29,6 +30,7 @@ export function loadConfig(env = process.env): BotRunnerConfig {
     heartbeatIntervalMs: Number(env.HEARTBEAT_INTERVAL_MS ?? 5000),
     reconcileIntervalMs: Number(env.RECONCILE_INTERVAL_MS ?? 60000),
     staleSeconds: Number(env.STALE_SECONDS ?? 30),
-    persistenceEnabled: env.PERSISTENCE_ENABLED !== "false"
+    persistenceEnabled: env.PERSISTENCE_ENABLED !== "false",
+    executionEnabled: env.EXECUTION_ENABLED !== "false"
   };
 }

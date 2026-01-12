@@ -16,26 +16,26 @@ export class JupiterLimitOrderConnector implements ExecutionConnector {
   constructor(private config: JupiterLimitOrderConfig) {}
 
   async placeLimitOrder(_: PlaceLimitOrderIntent): Promise<ExecutionResult> {
-    throw new Error("JupiterLimitOrderConnector not implemented");
+    return { ok: false, error: "JupiterLimitOrderConnector not implemented" };
   }
 
   async cancelLimitOrder(_: CancelLimitOrderIntent): Promise<ExecutionResult> {
-    throw new Error("JupiterLimitOrderConnector not implemented");
+    return { ok: false, error: "JupiterLimitOrderConnector not implemented" };
   }
 
   async cancelAll(_: CancelAllIntent): Promise<ExecutionResult> {
-    throw new Error("JupiterLimitOrderConnector not implemented");
+    return { ok: false, error: "JupiterLimitOrderConnector not implemented" };
   }
 
   async replaceLimitOrder(_: ReplaceLimitOrderIntent): Promise<ExecutionResult> {
-    throw new Error("JupiterLimitOrderConnector not implemented");
+    return { ok: false, error: "JupiterLimitOrderConnector not implemented" };
   }
 
   async getOpenOrders(_: string): Promise<OpenOrder[]> {
-    throw new Error("JupiterLimitOrderConnector not implemented");
+    return [];
   }
 
   async reconcile(_: string): Promise<ReconcileResult> {
-    throw new Error("JupiterLimitOrderConnector not implemented");
+    return { ok: false, message: "JupiterLimitOrderConnector not implemented" };
   }
 }

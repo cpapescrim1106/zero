@@ -4,6 +4,7 @@ export type EventKind =
   | "price"
   | "balance"
   | "wallet_tx"
+  | "intent"
   | "order"
   | "fill"
   | "bot"
@@ -54,8 +55,8 @@ export interface OrderEvent extends BaseEvent {
   venue: string;
   externalId?: string;
   side: "buy" | "sell";
-  price: string;
-  size: string;
+  price?: string;
+  size?: string;
   status: "new" | "open" | "partial" | "filled" | "canceled" | "rejected";
 }
 
@@ -77,6 +78,12 @@ export interface BotEvent extends BaseEvent {
   botId: string;
   status: "starting" | "running" | "paused" | "stopped" | "error";
   message?: string;
+}
+
+export interface IntentEvent extends BaseEvent {
+  kind: "intent";
+  botId: string;
+  intent: unknown;
 }
 
 export interface RiskEvent extends BaseEvent {
@@ -104,6 +111,7 @@ export type NormalizedEvent =
   | PriceEvent
   | BalanceEvent
   | WalletTxEvent
+  | IntentEvent
   | OrderEvent
   | FillEvent
   | BotEvent
