@@ -20,9 +20,15 @@ importers:
 
   apps/api:
     dependencies:
+      '@zero/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       fastify:
         specifier: ^4.28.1
         version: 4.29.1
+      ioredis:
+        specifier: ^5.4.1
+        version: 5.9.1
     devDependencies:
       tsx:
         specifier: ^4.16.2

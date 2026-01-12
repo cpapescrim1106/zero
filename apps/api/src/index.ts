@@ -1,16 +1,20 @@
+import { loadConfig } from "./config";
+import { RedisBus } from "./redisBus";
 import { buildServer } from "./server";
 
-const port = Number(process.env.PORT ?? 3001);
-const host = process.env.HOST ?? "0.0.0.0";
-
-const server = buildServer();
+const config = loadConfig();
+const bus = new RedisBus(config.redisUrl);
+const server = buildServer(bus);
 
 server
-  .listen({ port, host })
+  .listen({ port: config.port, host: config.host })
   .then(() => {
-    server.log.info({ port, host }, "api listening");
+    server.log.info({ port: config.port, host: config.host }, "api listening");
   })
   .catch((err) => {
     server.log.error(err, "api failed to start");
     process.exit(1);
   });
+
+process.on("SIGINT", () => void bus.close().finally(() => process.exit(0)));
+process.on("SIGTERM", () => void bus.close().finally(() => process.exit(0)));
