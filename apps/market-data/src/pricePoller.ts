@@ -40,7 +40,7 @@ export class PricePoller {
       if (!response.ok) {
         return;
       }
-      const payload = await response.json();
+      const payload = (await response.json()) as { data?: Record<string, { price?: number }> };
       const data = payload?.data ?? {};
       const ts = new Date().toISOString();
       for (const symbol of this.options.symbols) {

@@ -12,7 +12,12 @@
     "lint": "echo 'no lint configured'"
   },
   "dependencies": {
-    "fastify": "^4.28.1"
+    "@zero/connectors": "workspace:*",
+    "@zero/core": "workspace:*",
+    "@zero/db": "workspace:*",
+    "@zero/strategies": "workspace:*",
+    "fastify": "^4.28.1",
+    "ioredis": "^5.4.1"
   },
   "devDependencies": {
     "tsx": "^4.16.2"

@@ -1,16 +1,21 @@
 import { buildServer } from "./server";
+import { loadConfig } from "./config";
+import { BotRunnerService } from "./runnerService";
 
-const port = Number(process.env.PORT ?? 3003);
-const host = process.env.HOST ?? "0.0.0.0";
-
+const config = loadConfig();
 const server = buildServer();
+const service = new BotRunnerService(config);
 
 server
-  .listen({ port, host })
-  .then(() => {
-    server.log.info({ port, host }, "bot-runner listening");
+  .listen({ port: config.port, host: config.host })
+  .then(async () => {
+    server.log.info({ port: config.port, host: config.host }, "bot-runner listening");
+    await service.start();
   })
   .catch((err) => {
     server.log.error(err, "bot-runner failed to start");
     process.exit(1);
   });
+
+process.on("SIGINT", () => void service.stop().finally(() => process.exit(0)));
+process.on("SIGTERM", () => void service.stop().finally(() => process.exit(0)));

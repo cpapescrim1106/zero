@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import WebSocket from "ws";
+import WebSocket, { type RawData } from "ws";
 import type { BalanceEvent, NormalizedEvent, WalletTxEvent } from "@zero/core";
 
 const TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
@@ -45,10 +45,10 @@ class RpcWebSocket {
         return;
       }
       this.ws.on("open", () => resolve());
-      this.ws.on("error", (err) => reject(err));
+      this.ws.on("error", (err: Error) => reject(err));
     });
-    this.ws.on("message", (data) => this.handleMessage(data.toString()));
-    this.ws.on("error", (err) => this.log?.("ws error", { error: err.message }));
+    this.ws.on("message", (data: RawData) => this.handleMessage(data.toString()));
+    this.ws.on("error", (err: Error) => this.log?.("ws error", { error: err.message }));
     this.ws.on("close", () => this.handleClose());
   }
 
@@ -69,7 +69,7 @@ class RpcWebSocket {
     }
     const response = new Promise<unknown>((resolve, reject) => {
       this.inflight.set(id, { resolve, reject });
-      this.ws?.send(message, (err) => {
+      this.ws?.send(message, (err?: Error) => {
         if (err) {
           this.inflight.delete(id);
           reject(err);
@@ -227,7 +227,7 @@ export class HeliusProvider {
     if (!response.ok) {
       throw new Error("Failed to fetch token accounts");
     }
-    const payload = await response.json();
+    const payload = (await response.json()) as { result?: { value?: any[] } };
     const accounts = payload?.result?.value ?? [];
     return accounts
       .map((entry: any) => {
