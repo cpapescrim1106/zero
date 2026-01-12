@@ -92,6 +92,20 @@ export class BotManager {
     return updated;
   }
 
+  setConfig(botId: string, config: BotConfig, status?: BotState["status"]) {
+    this.configs.set(botId, config);
+    const state = this.ensureState(botId, config);
+    state.market = config.market;
+    state.venue = config.venue;
+    state.mode = config.mode;
+    if (status) {
+      state.status = status;
+    }
+    state.lastEventAt = new Date().toISOString();
+    this.states.set(botId, state);
+    return state;
+  }
+
   updateRisk(botId: string, risk: RiskState) {
     const state = this.ensureState(botId);
     state.risk = risk;

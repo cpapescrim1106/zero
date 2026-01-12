@@ -1,9 +1,10 @@
 import Fastify from "fastify";
+import type { BotCommandAction, BotConfig, RiskLimits } from "@zero/core";
 import { CACHE_KEYS } from "@zero/core";
-import type { BotCommandAction } from "@zero/core";
+import type { PrismaClient } from "@zero/db";
 import { RedisBus } from "./redisBus";
 
-export function buildServer(bus: RedisBus) {
+export function buildServer(bus: RedisBus, db: PrismaClient) {
   const server = Fastify({ logger: true });
 
   server.get("/health", async () => ({
@@ -20,6 +21,88 @@ export function buildServer(bus: RedisBus) {
       return { ok: false, error: "bot not found" };
     }
     return { ok: true, state };
+  });
+
+  server.get("/bots", async () => {
+    const bots = await db.bot.findMany({ orderBy: { createdAt: "desc" } });
+    return { ok: true, bots };
+  });
+
+  server.get("/bots/:id", async (request, reply) => {
+    const botId = (request.params as { id: string }).id;
+    const bot = await db.bot.findUnique({ where: { id: botId } });
+    if (!bot) {
+      reply.code(404);
+      return { ok: false, error: "bot not found" };
+    }
+    return { ok: true, bot };
+  });
+
+  server.post("/bots", async (request, reply) => {
+    const body = request.body as {
+      name?: string;
+      strategyKey?: string;
+      venue?: string;
+      market?: string;
+      config?: BotConfig;
+      riskConfig?: RiskLimits;
+      schedule?: Record<string, unknown>;
+      status?: string;
+    };
+    if (!body?.name || !body?.strategyKey || !body?.venue || !body?.market || !body?.config) {
+      reply.code(400);
+      return { ok: false, error: "missing required fields" };
+    }
+    const bot = await db.bot.create({
+      data: {
+        name: body.name,
+        strategyKey: body.strategyKey,
+        venue: body.venue,
+        market: body.market,
+        config: body.config,
+        riskConfig: body.riskConfig ?? {},
+        schedule: body.schedule ?? null,
+        status: body.status ?? "stopped"
+      }
+    });
+    await bus.publishCommand(bot.id, "update_config", { config: body.config });
+    return { ok: true, bot };
+  });
+
+  server.patch("/bots/:id", async (request, reply) => {
+    const botId = (request.params as { id: string }).id;
+    const body = request.body as {
+      name?: string;
+      strategyKey?: string;
+      venue?: string;
+      market?: string;
+      config?: BotConfig;
+      riskConfig?: RiskLimits;
+      schedule?: Record<string, unknown> | null;
+      status?: string;
+    };
+    const existing = await db.bot.findUnique({ where: { id: botId } });
+    if (!existing) {
+      reply.code(404);
+      return { ok: false, error: "bot not found" };
+    }
+    const bot = await db.bot.update({
+      where: { id: botId },
+      data: {
+        name: body.name,
+        strategyKey: body.strategyKey,
+        venue: body.venue,
+        market: body.market,
+        config: body.config,
+        riskConfig: body.riskConfig,
+        schedule: body.schedule,
+        status: body.status
+      }
+    });
+    if (body.config) {
+      await bus.publishCommand(bot.id, "update_config", { config: body.config });
+    }
+    return { ok: true, bot };
   });
 
   server.post("/bots/:id/command", async (request, reply) => {

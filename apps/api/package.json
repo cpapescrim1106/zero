@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@zero/core": "workspace:*",
+    "@zero/db": "workspace:*",
     "fastify": "^4.28.1",
     "ioredis": "^5.4.1"
   },

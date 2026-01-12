@@ -23,6 +23,9 @@ importers:
       '@zero/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@zero/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       fastify:
         specifier: ^4.28.1
         version: 4.29.1

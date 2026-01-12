@@ -52,4 +52,11 @@ export class Persistence {
       }
     });
   }
+
+  async listBots() {
+    if (!this.prisma) {
+      return [];
+    }
+    return this.prisma.bot.findMany();
+  }
 }

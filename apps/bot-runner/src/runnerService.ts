@@ -1,4 +1,4 @@
-import type { BotCommand, BotConfig, NormalizedEvent, PriceEvent, RedisEnvelope } from "@zero/core";
+import type { BotCommand, BotConfig, BotState, NormalizedEvent, PriceEvent, RedisEnvelope } from "@zero/core";
 import { CACHE_KEYS } from "@zero/core";
 import { JupiterLimitOrderConnector } from "@zero/connectors";
 import type { Strategy } from "@zero/strategies";
@@ -36,6 +36,8 @@ export class BotRunnerService {
     this.bus.onPattern("cmd:bot:*", (channel, message) => this.handleCommand(channel, message));
     this.bus.onPattern("md:price:*", (channel, message) => this.handleMarketEvent(channel, message));
 
+    await this.loadBots();
+
     this.heartbeatTimer = setInterval(() => {
       void this.checkHealth();
     }, this.config.heartbeatIntervalMs);
@@ -61,6 +63,14 @@ export class BotRunnerService {
     void this.bus.setCache(CACHE_KEYS.bot(command.botId), result.state);
     void this.persistence.logEvent(result.event);
     void this.persistence.saveBotSnapshot(result.state);
+  }
+
+  private async loadBots() {
+    const bots = await this.persistence.listBots();
+    for (const bot of bots) {
+      const state = this.bots.setConfig(bot.id, bot.config as BotConfig, bot.status as BotState["status"]);
+      await this.bus.setCache(CACHE_KEYS.bot(bot.id), state);
+    }
   }
 
   private handleMarketEvent(_channel: string, message: string) {
