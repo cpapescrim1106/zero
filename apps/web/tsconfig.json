@@ -5,6 +5,7 @@
     "noEmit": true,
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "lib": ["dom", "dom.iterable", "es2022"],
     "allowJs": true,
     "incremental": true
   },

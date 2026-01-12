@@ -1,3 +1,5 @@
+import type { BotRuntime } from "./types";
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 
 export async function api<T>(path: string, options?: RequestInit): Promise<T> {
@@ -25,6 +27,7 @@ export interface ApiBot {
   riskConfig: Record<string, unknown>;
   schedule?: Record<string, unknown> | null;
   status: string;
+  runtime?: BotRuntime;
 }
 
 export interface BotsResponse {
@@ -35,6 +38,17 @@ export interface BotsResponse {
 export interface BotResponse {
   ok: boolean;
   bot: ApiBot;
+}
+
+export interface BotStateResponse {
+  ok: boolean;
+  state: {
+    botId: string;
+    status: string;
+    scheduleActive?: boolean;
+    lastEventAt?: string;
+    risk?: Record<string, unknown>;
+  };
 }
 
 export interface CreateBotPayload {
@@ -55,9 +69,20 @@ export async function fetchBot(id: string) {
   return api<BotResponse>(`/bots/${id}`);
 }
 
+export async function fetchBotState(id: string) {
+  return api<BotStateResponse>(`/bots/${id}/state`);
+}
+
 export async function createBot(payload: CreateBotPayload) {
   return api<BotResponse>("/bots", {
     method: "POST",
     body: JSON.stringify(payload)
+  });
+}
+
+export async function sendBotCommand(botId: string, action: string) {
+  return api<{ ok: boolean }>(`/bots/${botId}/command`, {
+    method: "POST",
+    body: JSON.stringify({ action })
   });
 }
