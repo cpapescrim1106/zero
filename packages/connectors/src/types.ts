@@ -9,6 +9,9 @@ export interface ExecutionResult {
   ok: boolean;
   externalId?: string;
   error?: string;
+  meta?: {
+    canceled?: number;
+  };
 }
 
 export interface OpenOrder {

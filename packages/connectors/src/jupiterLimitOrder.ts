@@ -5,10 +5,11 @@ import type {
   ReplaceLimitOrderIntent
 } from "@zero/core";
 import type { ExecutionConnector, ExecutionResult, OpenOrder, ReconcileResult } from "./types";
-import { Connection, Keypair, PublicKey, Transaction, VersionedTransaction } from "@solana/web3.js";
+import { getTokensForCluster, type Cluster, type TokenInfo } from "./tokenRegistry";
+import { Connection, Keypair, PublicKey, Transaction, VersionedMessage, VersionedTransaction } from "@solana/web3.js";
 import BN from "bn.js";
 import bs58 from "bs58";
-import { fetch, type Response } from "undici";
+import { fetch } from "undici";
 
 export interface JupiterLimitOrderConfig {
   rpcUrl: string;
@@ -17,15 +18,9 @@ export interface JupiterLimitOrderConfig {
   apiUrl?: string;
   apiKey?: string;
   computeUnitPrice?: "auto" | string;
+  apiRps?: number;
+  minOrderUsd?: number;
 }
-
-type Cluster = "mainnet-beta" | "devnet" | "localnet";
-
-type TokenInfo = {
-  symbol: string;
-  mint: string;
-  decimals: number;
-};
 
 type CreateOrderResponse = {
   order: string;
@@ -48,29 +43,19 @@ type TriggerOrder = {
   orderId?: string;
   id?: string;
   publicKey?: string;
+  orderKey?: string;
   inputMint?: string;
   outputMint?: string;
   makingAmount?: string;
   takingAmount?: string;
   remainingMakingAmount?: string;
   remainingTakingAmount?: string;
+  rawMakingAmount?: string;
+  rawTakingAmount?: string;
+  rawRemainingMakingAmount?: string;
+  rawRemainingTakingAmount?: string;
   orderStatus?: string;
   status?: string;
-};
-
-const TOKEN_REGISTRY: Record<Cluster, Record<string, TokenInfo>> = {
-  "mainnet-beta": {
-    SOL: { symbol: "SOL", mint: "So11111111111111111111111111111111111111112", decimals: 9 },
-    USDC: { symbol: "USDC", mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", decimals: 6 },
-    USDT: { symbol: "USDT", mint: "Es9vMFrzaCER1a6c7fggkP6yqoCqkf9rD8qt4V9rW", decimals: 6 }
-  },
-  devnet: {
-    SOL: { symbol: "SOL", mint: "So11111111111111111111111111111111111111112", decimals: 9 },
-    USDC: { symbol: "USDC", mint: "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU", decimals: 6 }
-  },
-  localnet: {
-    SOL: { symbol: "SOL", mint: "So11111111111111111111111111111111111111112", decimals: 9 }
-  }
 };
 
 const TEN = new BN(10);
@@ -85,10 +70,13 @@ export class JupiterLimitOrderConnector implements ExecutionConnector {
   private apiUrl: string;
   private apiKey?: string;
   private computeUnitPrice: "auto" | string;
+  private apiQueue: RequestQueue;
+  private apiMinIntervalMs: number;
+  private minOrderUsd: number;
 
   constructor(private config: JupiterLimitOrderConfig) {
     const cluster = config.cluster ?? "mainnet-beta";
-    this.tokens = TOKEN_REGISTRY[cluster] ?? TOKEN_REGISTRY["mainnet-beta"];
+    this.tokens = getTokensForCluster(cluster);
     this.tokensByMint = Object.values(this.tokens).reduce<Record<string, TokenInfo>>((acc, token) => {
       acc[token.mint] = token;
       return acc;
@@ -99,6 +87,13 @@ export class JupiterLimitOrderConnector implements ExecutionConnector {
     this.apiUrl = (config.apiUrl ?? "https://api.jup.ag/trigger/v1").replace(/\/$/, "");
     this.apiKey = config.apiKey;
     this.computeUnitPrice = config.computeUnitPrice ?? "auto";
+    const apiRps = Number.isFinite(config.apiRps) && (config.apiRps ?? 0) > 0 ? (config.apiRps as number) : 1;
+    this.apiMinIntervalMs = Math.ceil(1000 / apiRps);
+    this.apiQueue = new RequestQueue(apiRps);
+    this.minOrderUsd =
+      Number.isFinite(config.minOrderUsd) && (config.minOrderUsd ?? 0) > 0
+        ? (config.minOrderUsd as number)
+        : 5;
   }
 
   async placeLimitOrder(intent: PlaceLimitOrderIntent): Promise<ExecutionResult> {
@@ -121,6 +116,15 @@ export class JupiterLimitOrderConnector implements ExecutionConnector {
         baseToken,
         quoteToken
       );
+      const quoteNotional = Number(
+        formatAmount(outAmountIsQuote(intent.side) ? outAmount : inAmount, quoteToken.decimals)
+      );
+      if (isStableSymbol(quoteToken.symbol) && Number.isFinite(quoteNotional) && quoteNotional < this.minOrderUsd) {
+        return {
+          ok: false,
+          error: `Order notional below min $${this.minOrderUsd.toFixed(2)}`
+        };
+      }
       mintDebug = {
         symbol: intent.symbol,
         side: intent.side,
@@ -170,12 +174,26 @@ export class JupiterLimitOrderConnector implements ExecutionConnector {
 
   async cancelAll(intent: CancelAllIntent): Promise<ExecutionResult> {
     try {
-      const openOrders = await this.getOpenOrders(intent.symbol);
+      let openOrders = await this.getOpenOrders(intent.symbol);
+      if (openOrders.length === 0) {
+        const baseQuote = safeParseSymbol(intent.symbol);
+        const orders = await this.fetchTriggerOrders("active");
+        console.info("[jupiter] cancel all fetchTriggerOrders", { symbol: intent.symbol, count: orders.length });
+        const filtered = baseQuote
+          ? orders.filter((order) =>
+              matchMarket(order, baseQuote, this.tokensByMint, this.quoteSymbols)
+            )
+          : orders;
+        openOrders = filtered
+          .map((order) => toOpenOrder(order, this.tokensByMint, this.quoteSymbols))
+          .filter((order): order is OpenOrder => Boolean(order));
+      }
       const orderIds = openOrders
         .map((order) => order.externalId ?? order.orderId)
         .filter((orderId): orderId is string => Boolean(orderId));
       if (orderIds.length === 0) {
-        return { ok: true };
+        console.warn("[jupiter] cancel all returned no open orders", { symbol: intent.symbol });
+        return { ok: true, meta: { canceled: 0 } };
       }
       const chunks = chunk(orderIds, 10);
       for (const batch of chunks) {
@@ -188,7 +206,7 @@ export class JupiterLimitOrderConnector implements ExecutionConnector {
           await this.signAndSendTransaction(encoded);
         }
       }
-      return { ok: true };
+      return { ok: true, meta: { canceled: orderIds.length } };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
     }
@@ -229,7 +247,23 @@ export class JupiterLimitOrderConnector implements ExecutionConnector {
 
   async getOpenOrders(market: string): Promise<OpenOrder[]> {
     const baseQuote = safeParseSymbol(market);
-    const orders = await this.fetchTriggerOrders("active");
+    let orders: TriggerOrder[] = [];
+    if (baseQuote) {
+      const baseToken = getToken(this.tokens, baseQuote.base);
+      const quoteToken = getToken(this.tokens, baseQuote.quote);
+      const forward = await this.fetchTriggerOrders("active", baseToken.mint, quoteToken.mint);
+      const reverse = await this.fetchTriggerOrders("active", quoteToken.mint, baseToken.mint);
+      const merged = new Map<string, TriggerOrder>();
+      for (const order of [...forward, ...reverse]) {
+        const orderId = extractOrderId(order);
+        if (orderId) {
+          merged.set(orderId, order);
+        }
+      }
+      orders = Array.from(merged.values());
+    } else {
+      orders = await this.fetchTriggerOrders("active");
+    }
     const filtered = baseQuote
       ? orders.filter((order) =>
           matchMarket(order, baseQuote, this.tokensByMint, this.quoteSymbols)
@@ -252,31 +286,54 @@ export class JupiterLimitOrderConnector implements ExecutionConnector {
     return orders.find((order) => extractOrderId(order) === orderId) ?? null;
   }
 
-  private async fetchTriggerOrders(status: "active" | "history" | "all"): Promise<TriggerOrder[]> {
-    const url = new URL(`${this.apiUrl}/getTriggerOrders`);
-    url.searchParams.set("user", this.owner.publicKey.toBase58());
-    if (status && status !== "all") {
-      url.searchParams.set("orderStatus", status);
+  private async fetchTriggerOrders(
+    status: "active" | "history" | "all",
+    inputMint?: string,
+    outputMint?: string
+  ): Promise<TriggerOrder[]> {
+    const orders: TriggerOrder[] = [];
+    let page = 1;
+    let hasMore = true;
+    while (hasMore) {
+      const url = new URL(`${this.apiUrl}/getTriggerOrders`);
+      url.searchParams.set("user", this.owner.publicKey.toBase58());
+      if (status && status !== "all") {
+        url.searchParams.set("orderStatus", status);
+      }
+      if (inputMint && outputMint) {
+        url.searchParams.set("inputMint", inputMint);
+        url.searchParams.set("outputMint", outputMint);
+      }
+      url.searchParams.set("page", String(page));
+      const payload = await this.getJson<unknown>(url.toString());
+      const pageResult = extractTriggerOrdersPage(payload);
+      orders.push(...pageResult.orders);
+      hasMore = pageResult.hasMoreData;
+      if (!pageResult.hasMoreData || pageResult.orders.length === 0) {
+        break;
+      }
+      page += 1;
     }
-    const payload = await this.getJson<unknown>(url.toString());
-    return extractTriggerOrders(payload);
+    return orders;
   }
 
   private async postJson<T>(path: string, body: unknown): Promise<T> {
-    const response = await fetch(this.buildUrl(path), {
-      method: "POST",
-      headers: this.buildHeaders(true),
-      body: JSON.stringify(body)
-    });
-    return this.parseResponse<T>(response);
+    return this.apiQueue.schedule(() =>
+      this.requestJson<T>(this.buildUrl(path), {
+        method: "POST",
+        headers: this.buildHeaders(true),
+        body: JSON.stringify(body)
+      })
+    );
   }
 
   private async getJson<T>(url: string): Promise<T> {
-    const response = await fetch(url, {
-      method: "GET",
-      headers: this.buildHeaders(false)
-    });
-    return this.parseResponse<T>(response);
+    return this.apiQueue.schedule(() =>
+      this.requestJson<T>(url, {
+        method: "GET",
+        headers: this.buildHeaders(false)
+      })
+    );
   }
 
   private buildUrl(path: string) {
@@ -300,33 +357,82 @@ export class JupiterLimitOrderConnector implements ExecutionConnector {
     return headers;
   }
 
-  private async parseResponse<T>(response: Response): Promise<T> {
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`Jupiter API ${response.status}: ${text}`);
+  private async requestJson<T>(
+    url: string,
+    init: Parameters<typeof fetch>[1],
+    attempts = 3
+  ): Promise<T> {
+    let lastError: Error | undefined;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const response = await fetch(url, init);
+      if (response.status === 429) {
+        const retryAfter = response.headers.get("retry-after");
+        const retryMs = (parseRetryAfter(retryAfter) ?? this.apiMinIntervalMs) * (attempt + 1);
+        await sleep(retryMs);
+        continue;
+      }
+      if (!response.ok) {
+        const text = await response.text();
+        lastError = new Error(`Jupiter API ${response.status}: ${text}`);
+        throw lastError;
+      }
+      return (await response.json()) as T;
     }
-    return (await response.json()) as T;
+    lastError = lastError ?? new Error("Jupiter API rate limited");
+    throw lastError;
   }
 
   private async signAndSendTransaction(encoded: string) {
+    const raw = this.decodeAndSign(encoded);
+    return await this.sendWithRetry(raw);
+  }
+
+  private decodeAndSign(encoded: string) {
     const bytes = Buffer.from(encoded, "base64");
+    const errors: string[] = [];
     try {
       const tx = VersionedTransaction.deserialize(bytes);
       tx.sign([this.owner]);
-      return await this.sendAndConfirm(tx.serialize());
+      return tx.serialize();
     } catch (err) {
+      errors.push((err as Error).message);
+    }
+    try {
+      const message = VersionedMessage.deserialize(bytes);
+      const tx = new VersionedTransaction(message);
+      tx.sign([this.owner]);
+      return tx.serialize();
+    } catch (err) {
+      errors.push((err as Error).message);
+    }
+    try {
       const legacy = Transaction.from(bytes);
       legacy.partialSign(this.owner);
-      return await this.sendAndConfirm(legacy.serialize());
+      return legacy.serialize();
+    } catch (err) {
+      errors.push((err as Error).message);
     }
+    throw new Error(`Unable to decode Jupiter transaction: ${errors.join(" | ")}`);
   }
 
-  private async sendAndConfirm(raw: Uint8Array) {
-    const signature = await this.connection.sendRawTransaction(raw, {
-      skipPreflight: false
-    });
-    await this.connection.confirmTransaction(signature, "confirmed");
-    return signature;
+  private async sendWithRetry(raw: Uint8Array, attempts = 2) {
+    let lastError: Error | undefined;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        const signature = await this.connection.sendRawTransaction(raw, {
+          skipPreflight: false
+        });
+        await this.connection.confirmTransaction(signature, "confirmed");
+        return signature;
+      } catch (err) {
+        lastError = err as Error;
+        if (isBlockhashError(lastError) || attempt === attempts - 1) {
+          throw lastError;
+        }
+        await sleep(500 * (attempt + 1));
+      }
+    }
+    throw lastError ?? new Error("Failed to send transaction");
   }
 }
 
@@ -456,27 +562,69 @@ function chunk<T>(values: T[], size: number): T[][] {
   return out;
 }
 
-function extractTriggerOrders(payload: unknown): TriggerOrder[] {
+function parseRetryAfter(value: string | null): number | null {
+  if (!value) {
+    return null;
+  }
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds > 0) {
+    return seconds * 1000;
+  }
+  return null;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+class RequestQueue {
+  private chain: Promise<void> = Promise.resolve();
+  private lastRunAt = 0;
+
+  constructor(private rps: number) {}
+
+  schedule<T>(fn: () => Promise<T>) {
+    const minInterval = Math.ceil(1000 / Math.max(this.rps, 0.1));
+    const run = async () => {
+      const now = Date.now();
+      const wait = Math.max(0, this.lastRunAt + minInterval - now);
+      if (wait > 0) {
+        await sleep(wait);
+      }
+      this.lastRunAt = Date.now();
+      return fn();
+    };
+    const result = this.chain.then(run);
+    this.chain = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
+  }
+}
+
+function extractTriggerOrdersPage(payload: unknown): { orders: TriggerOrder[]; hasMoreData: boolean } {
   if (!payload) {
-    return [];
+    return { orders: [], hasMoreData: false };
   }
   if (Array.isArray(payload)) {
-    return payload as TriggerOrder[];
+    return { orders: payload as TriggerOrder[], hasMoreData: false };
   }
   if (typeof payload === "object") {
     const record = payload as Record<string, unknown>;
-    if (Array.isArray(record.orders)) {
-      return record.orders as TriggerOrder[];
-    }
-    if (Array.isArray(record.data)) {
-      return record.data as TriggerOrder[];
-    }
+    const orders = Array.isArray(record.orders)
+      ? (record.orders as TriggerOrder[])
+      : Array.isArray(record.data)
+        ? (record.data as TriggerOrder[])
+        : [];
+    const hasMoreData = Boolean(record.hasMoreData);
+    return { orders, hasMoreData };
   }
-  return [];
+  return { orders: [], hasMoreData: false };
 }
 
 function extractOrderId(order: TriggerOrder): string | null {
-  return order.order ?? order.orderId ?? order.id ?? order.publicKey ?? null;
+  return order.order ?? order.orderId ?? order.id ?? order.publicKey ?? order.orderKey ?? null;
 }
 
 function matchMarket(
@@ -513,10 +661,10 @@ function toOpenOrder(
   const quoteToken = resolveQuoteToken(tokensByMint, quoteSymbols, inputMint, outputMint);
   const side = inputMint === baseToken.mint ? "sell" : "buy";
 
-  const originalMaking = toBn(order.makingAmount);
-  const originalTaking = toBn(order.takingAmount);
-  const remainingMaking = toBn(order.remainingMakingAmount ?? order.makingAmount);
-  const remainingTaking = toBn(order.remainingTakingAmount ?? order.takingAmount);
+  const originalMaking = toBn(order.rawMakingAmount ?? order.makingAmount);
+  const originalTaking = toBn(order.rawTakingAmount ?? order.takingAmount);
+  const remainingMaking = toBn(order.rawRemainingMakingAmount ?? order.remainingMakingAmount ?? order.rawMakingAmount ?? order.makingAmount);
+  const remainingTaking = toBn(order.rawRemainingTakingAmount ?? order.remainingTakingAmount ?? order.rawTakingAmount ?? order.takingAmount);
   if (!remainingMaking || !remainingTaking || remainingMaking.isZero() || remainingTaking.isZero()) {
     return null;
   }
@@ -558,4 +706,18 @@ function toBn(value?: string): BN | null {
   } catch {
     return null;
   }
+}
+
+function outAmountIsQuote(side: "buy" | "sell") {
+  return side === "sell";
+}
+
+function isStableSymbol(symbol: string) {
+  const normalized = symbol.toUpperCase();
+  return normalized === "USDC" || normalized === "USDT";
+}
+
+function isBlockhashError(err: Error) {
+  const message = err.message.toLowerCase();
+  return message.includes("blockhash") || message.includes("block height") || message.includes("expired");
 }

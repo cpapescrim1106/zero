@@ -16,6 +16,7 @@
     "lint": "echo 'no lint configured'"
   },
   "dependencies": {
+    "@drift-labs/sdk": "^2.115.0",
     "@solana/web3.js": "^1.98.4",
     "@zero/core": "workspace:*",
     "bn.js": "^5.2.1",
