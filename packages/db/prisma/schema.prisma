@@ -156,3 +156,82 @@ model RiskEvent {
 
   @@index([botId, ts])
 }
+
+model PerpsAccount {
+  id           String   @id @default(uuid())
+  botId        String   @unique
+  walletId     String
+  subaccountId Int
+  venue        String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  meta         Json?
+
+  @@index([walletId])
+  @@index([subaccountId])
+}
+
+model PerpsPosition {
+  id            String   @id @default(uuid())
+  botId         String
+  market        String
+  baseQty       Decimal  @db.Decimal(38, 18)
+  quoteQty      Decimal  @db.Decimal(38, 18)
+  entryPrice    Decimal? @db.Decimal(38, 18)
+  markPrice     Decimal? @db.Decimal(38, 18)
+  leverage      Decimal? @db.Decimal(38, 18)
+  liqPrice      Decimal? @db.Decimal(38, 18)
+  pnlUnrealized Decimal? @db.Decimal(38, 18)
+  pnlRealized   Decimal? @db.Decimal(38, 18)
+  pnlFunding    Decimal? @db.Decimal(38, 18)
+  ts            DateTime @default(now())
+  meta          Json?
+
+  @@index([botId, ts])
+  @@index([market, ts])
+}
+
+model PerpsMarginSnapshot {
+  id          String   @id @default(uuid())
+  botId       String
+  equity      Decimal? @db.Decimal(38, 18)
+  marginUsed  Decimal? @db.Decimal(38, 18)
+  healthRatio Decimal? @db.Decimal(38, 18)
+  leverage    Decimal? @db.Decimal(38, 18)
+  ts          DateTime @default(now())
+  meta        Json?
+
+  @@index([botId, ts])
+}
+
+model PerpsFundingSnapshot {
+  id            String   @id @default(uuid())
+  market        String
+  fundingRate   Decimal? @db.Decimal(38, 18)
+  nextFundingAt DateTime?
+  ts            DateTime @default(now())
+  meta          Json?
+
+  @@index([market, ts])
+}
+
+model PerpsObjective {
+  id        String   @id @default(uuid())
+  botId     String
+  market    String
+  kind      String
+  payload   Json
+  status    String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  meta      Json?
+
+  @@index([botId, createdAt])
+}
+
+model PerpsRiskConfig {
+  id        String   @id @default("global")
+  config    Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
