@@ -17,13 +17,46 @@ export class ExecutionEngine {
 
       if (intent.kind === "place_limit_order") {
         const result = await this.safeCall(() => this.connector.placeLimitOrder(intent));
+        if (!result.ok) {
+          console.warn("[bot-runner] place order failed", {
+            botId,
+            intentId: intent.id,
+            error: result.error
+          });
+        }
         events.push(this.buildOrderEvent(botId, intent, result));
       } else if (intent.kind === "cancel_limit_order") {
-        await this.safeCall(() => this.connector.cancelLimitOrder(intent));
+        const result = await this.safeCall(() => this.connector.cancelLimitOrder(intent));
+        if (!result.ok) {
+          console.warn("[bot-runner] cancel order failed", {
+            botId,
+            intentId: intent.id,
+            error: result.error
+          });
+        } else {
+          const cancelEvent = this.buildCancelEvent(botId, intent);
+          if (cancelEvent) {
+            events.push(cancelEvent);
+          }
+        }
       } else if (intent.kind === "cancel_all") {
-        await this.safeCall(() => this.connector.cancelAll(intent));
+        const result = await this.safeCall(() => this.connector.cancelAll(intent));
+        if (!result.ok) {
+          console.warn("[bot-runner] cancel all failed", {
+            botId,
+            intentId: intent.id,
+            error: result.error
+          });
+        }
       } else if (intent.kind === "replace_limit_order") {
-        await this.safeCall(() => this.connector.replaceLimitOrder(intent));
+        const result = await this.safeCall(() => this.connector.replaceLimitOrder(intent));
+        if (!result.ok) {
+          console.warn("[bot-runner] replace order failed", {
+            botId,
+            intentId: intent.id,
+            error: result.error
+          });
+        }
       }
     }
 
@@ -56,7 +89,29 @@ export class ExecutionEngine {
       side: intent.side,
       price: intent.price,
       size: intent.size,
-      status: result.ok ? "new" : "rejected"
+      status: result.ok ? "new" : "rejected",
+      error: result.ok ? undefined : result.error
+    };
+  }
+
+  private buildCancelEvent(botId: string, intent: Extract<Intent, { kind: "cancel_limit_order" }>): OrderEvent | null {
+    if (!intent.side) {
+      return null;
+    }
+    return {
+      id: randomUUID(),
+      version: "v1",
+      kind: "order",
+      ts: new Date().toISOString(),
+      source: "jupiter",
+      botId,
+      orderId: intent.orderId,
+      venue: this.connector.venue,
+      externalId: intent.externalId,
+      side: intent.side,
+      price: intent.price,
+      size: intent.size,
+      status: "canceled"
     };
   }
 

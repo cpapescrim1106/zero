@@ -1,7 +1,19 @@
 import { randomUUID } from "crypto";
-import type { BotCommand, BotConfig, BotState, FillEvent, NormalizedEvent, PriceEvent, RedisEnvelope } from "@zero/core";
-import { CACHE_KEYS } from "@zero/core";
-import { JupiterLimitOrderConnector } from "@zero/connectors";
+import type {
+  BalanceEvent,
+  BotCommand,
+  BotConfig,
+  BotState,
+  FillEvent,
+  NormalizedEvent,
+  OrderEvent,
+  PerpsMarketEvent,
+  PriceEvent,
+  RedisEnvelope,
+  WalletTxEvent
+} from "@zero/core";
+import { CACHE_KEYS, CHANNELS } from "@zero/core";
+import { DriftPerpsConnector, JupiterLimitOrderConnector, getTokenByMint } from "@zero/connectors";
 import type { Strategy } from "@zero/strategies";
 import type { BotRunnerConfig } from "./config";
 import { BotManager } from "./botManager";
@@ -9,6 +21,7 @@ import { ExecutionEngine } from "./executionEngine";
 import { IntentEngine } from "./intentEngine";
 import { MarketStateStore } from "./marketState";
 import { NoopConnector } from "./noopConnector";
+import { DEFAULT_PERPS_RISK_CONFIG, PerpsRiskGovernor } from "./perpsRiskGovernor";
 import { Persistence } from "./persistence";
 import { RedisBus } from "./redisBus";
 import { RiskGovernor } from "./riskGovernor";
@@ -21,41 +34,70 @@ export class BotRunnerService {
   private bots = new BotManager();
   private market = new MarketStateStore();
   private intents = new IntentEngine();
-  private risk = new RiskGovernor();
-  private execution: ExecutionEngine;
+  private spotRisk = new RiskGovernor();
+  private perpsRisk = new PerpsRiskGovernor();
+  private perpsRiskConfig = DEFAULT_PERPS_RISK_CONFIG;
+  private spotExecution: ExecutionEngine;
+  private noopExecution: ExecutionEngine;
+  private simulatedExecution: ExecutionEngine;
   private strategies = buildStrategyRegistry();
-  private connector: JupiterLimitOrderConnector | NoopConnector | SimulatedConnector;
+  private spotConnector: JupiterLimitOrderConnector | NoopConnector | SimulatedConnector;
+  private perpsExecutions = new Map<string, ExecutionEngine>();
+  private perpsConnectors = new Map<string, DriftPerpsConnector>();
+  private noopConnector = new NoopConnector();
+  private simulatedConnector = new SimulatedConnector();
   private persistence: Persistence;
   private lastMarketEventAt = Date.now();
+  private lastSnapshotAt = new Map<string, number>();
+  private walletTxQueue = Promise.resolve();
+  private processedTxs = new Set<string>();
   private heartbeatTimer?: NodeJS.Timeout;
   private scheduleTimer?: NodeJS.Timeout;
   private reconcileTimer?: NodeJS.Timeout;
+  private accountSnapshotTimer?: NodeJS.Timeout;
+  private perpsRiskTimer?: NodeJS.Timeout;
+  private walletBalances = new Map<string, { balance: string; updatedAt: string }>();
+  private lastAccountSnapshotAt = 0;
 
   constructor(private config: BotRunnerConfig) {
     this.bus = new RedisBus(config.redisUrl);
     if (!config.executionEnabled || config.executionMode === "disabled") {
-      this.connector = new NoopConnector();
+      this.spotConnector = this.noopConnector;
     } else if (config.executionMode === "simulated") {
-      this.connector = new SimulatedConnector();
+      this.spotConnector = this.simulatedConnector;
     } else {
-      this.connector = new JupiterLimitOrderConnector({
+      this.spotConnector = new JupiterLimitOrderConnector({
         rpcUrl: config.solanaRpcUrl,
         privateKey: config.solanaPrivateKey,
         cluster: config.solanaCluster,
         apiUrl: config.jupiterTriggerApiUrl,
         apiKey: config.jupiterApiKey,
-        computeUnitPrice: config.jupiterComputeUnitPrice
+        computeUnitPrice: config.jupiterComputeUnitPrice,
+        apiRps: config.jupiterApiRps,
+        minOrderUsd: config.jupiterMinOrderUsd
       });
     }
-    this.execution = new ExecutionEngine(this.connector);
+    this.spotExecution = new ExecutionEngine(this.spotConnector);
+    this.noopExecution = new ExecutionEngine(this.noopConnector);
+    this.simulatedExecution = new ExecutionEngine(this.simulatedConnector);
     this.persistence = new Persistence(config.databaseUrl, config.persistenceEnabled);
   }
 
   async start() {
     this.bus.onPattern("cmd:bot:*", (channel, message) => this.handleCommand(channel, message));
     this.bus.onPattern("md:price:*", (channel, message) => this.handleMarketEvent(channel, message));
+    this.bus.onPattern("md:perps:*", (channel, message) => this.handleMarketEvent(channel, message));
+    if (this.config.walletPubkey) {
+      this.bus.onPattern(CHANNELS.walletBalances(this.config.walletPubkey), (channel, message) =>
+        this.handleWalletBalance(channel, message)
+      );
+      this.bus.onPattern(CHANNELS.walletTx(this.config.walletPubkey), (channel, message) =>
+        this.handleWalletTx(channel, message)
+      );
+    }
 
     await this.loadBots();
+    await this.loadPerpsRiskConfig();
 
     this.heartbeatTimer = setInterval(() => {
       void this.checkHealth();
@@ -66,6 +108,14 @@ export class BotRunnerService {
     this.reconcileTimer = setInterval(() => {
       void this.reconcileBots();
     }, this.config.reconcileIntervalMs);
+    if (this.config.walletPubkey) {
+      this.accountSnapshotTimer = setInterval(() => {
+        void this.maybeAccountSnapshot();
+      }, this.config.accountSnapshotIntervalMs);
+    }
+    this.perpsRiskTimer = setInterval(() => {
+      void this.loadPerpsRiskConfig();
+    }, 60000);
     await this.checkHealth();
   }
 
@@ -78,6 +128,12 @@ export class BotRunnerService {
     }
     if (this.reconcileTimer) {
       clearInterval(this.reconcileTimer);
+    }
+    if (this.accountSnapshotTimer) {
+      clearInterval(this.accountSnapshotTimer);
+    }
+    if (this.perpsRiskTimer) {
+      clearInterval(this.perpsRiskTimer);
     }
     await this.persistence.close();
     await this.bus.close();
@@ -95,6 +151,14 @@ export class BotRunnerService {
 
     const state = result.state;
     const config = this.bots.getConfig(command.botId);
+
+    if (command.action === "stop" && config && this.config.executionEnabled) {
+      void this.cancelOpenOrders(command.botId, config, state.runId, "stop");
+    }
+
+    if (command.action === "update_config" && command.payload?.cancelOpenOrders && config && this.config.executionEnabled) {
+      void this.cancelOpenOrders(command.botId, config, state.runId, "config_update");
+    }
 
     if ((command.action === "start" || command.action === "resume") && config) {
       void this.persistence
@@ -115,6 +179,10 @@ export class BotRunnerService {
       void this.persistence.saveBotSnapshot(state);
     }
 
+    if (["start", "resume", "pause", "stop"].includes(command.action)) {
+      void this.persistence.updateBotStatus(command.botId, state.status);
+    }
+
     void this.applySchedule(command.botId);
   }
 
@@ -133,21 +201,73 @@ export class BotRunnerService {
 
   private handleMarketEvent(_channel: string, message: string) {
     const envelope = parseEnvelope(message);
-    if (!envelope || envelope.kind !== "price") {
+    if (!envelope) {
       return;
     }
 
-    const event = envelope.data as PriceEvent;
-    this.lastMarketEventAt = Date.now();
-    this.market.applyPrice(event);
-    const updated = this.bots.updatePriceForSymbol(event.symbol, event.price, event.ts);
-    for (const state of updated) {
-      void this.bus.setCache(CACHE_KEYS.bot(state.botId), state);
-      void this.evaluateBot(state.botId);
-      if (this.config.executionMode === "simulated") {
-        void this.simulateFills(state.botId, event.price);
+    if (envelope.kind === "price") {
+      const event = envelope.data as PriceEvent;
+      this.lastMarketEventAt = Date.now();
+      this.market.applyPrice(event);
+      const updated = this.bots.updatePriceForSymbol(event.symbol, event.price, event.ts);
+      for (const state of updated) {
+        void this.bus.setCache(CACHE_KEYS.bot(state.botId), state);
+        this.maybeSnapshot(state);
+        void this.maybeAccountSnapshot();
+        void this.evaluateBot(state.botId);
+        if (this.config.executionMode === "simulated") {
+          void this.simulateFills(state.botId, event.price);
+        }
+      }
+      return;
+    }
+
+    if (envelope.kind === "perps_market") {
+      const event = envelope.data as PerpsMarketEvent;
+      this.lastMarketEventAt = Date.now();
+      this.market.applyPerpsMarket(event);
+      const updated = this.bots.updatePriceForSymbol(event.market, event.markPrice, event.ts);
+      for (const state of updated) {
+        void this.bus.setCache(CACHE_KEYS.bot(state.botId), state);
+        this.maybeSnapshot(state);
+        void this.evaluateBot(state.botId);
       }
     }
+  }
+
+  private handleWalletBalance(_channel: string, message: string) {
+    const envelope = parseEnvelope(message);
+    if (!envelope || envelope.kind !== "balance") {
+      return;
+    }
+    const event = envelope.data as BalanceEvent;
+    this.walletBalances.set(event.tokenMint, { balance: event.balance, updatedAt: event.ts });
+    void this.maybeAccountSnapshot();
+  }
+
+  private handleWalletTx(_channel: string, message: string) {
+    const envelope = parseEnvelope(message);
+    if (!envelope || envelope.kind !== "wallet_tx") {
+      return;
+    }
+    const event = envelope.data as WalletTxEvent;
+    if (!event.signature || event.status === "failed") {
+      return;
+    }
+    if (this.processedTxs.has(event.signature)) {
+      return;
+    }
+    this.processedTxs.add(event.signature);
+    if (this.processedTxs.size > 500) {
+      const first = this.processedTxs.values().next().value;
+      if (first) {
+        this.processedTxs.delete(first);
+      }
+    }
+
+    this.walletTxQueue = this.walletTxQueue
+      .then(() => this.processFillFromTx(event))
+      .catch((err) => console.warn("[bot-runner] wallet tx processing failed", err));
   }
 
   private async evaluateBot(botId: string) {
@@ -163,7 +283,11 @@ export class BotRunnerService {
       return;
     }
 
-    const market = this.market.get(config.grid.symbol);
+    const symbol = resolveMarketSymbol(config);
+    if (!symbol) {
+      return;
+    }
+    const market = this.market.get(symbol);
     if (!market) {
       return;
     }
@@ -179,6 +303,7 @@ export class BotRunnerService {
       market,
       openOrders: openOrders.map((order) => ({
         id: order.id,
+        externalId: order.externalId ?? undefined,
         side: order.side as "buy" | "sell",
         price: order.price.toString(),
         size: order.size.toString(),
@@ -186,7 +311,9 @@ export class BotRunnerService {
       }))
     });
 
-    const decision = this.risk.evaluate(state.risk, intents, botId);
+    const decision = isPerpsBot(config)
+      ? this.perpsRisk.evaluate(state.risk, intents, botId, market, this.perpsRiskConfig)
+      : this.spotRisk.evaluate(state.risk, intents, botId);
     const updatedState = this.bots.updateRisk(botId, decision.riskState);
     await this.bus.setCache(CACHE_KEYS.bot(botId), updatedState);
 
@@ -200,7 +327,9 @@ export class BotRunnerService {
       return;
     }
 
-    const execution = await this.execution.execute(botId, decision.allowedIntents);
+    const execution = await this.getExecutionEngine(botId, config).then((engine) =>
+      engine.execute(botId, decision.allowedIntents)
+    );
     for (const event of execution.events) {
       if (event.botId) {
         await this.bus.publishBotEvent(event);
@@ -243,11 +372,219 @@ export class BotRunnerService {
         continue;
       }
       try {
-        await this.connector.reconcile(config.market);
+        const connector = await this.getConnector(botId, config);
+        await connector.reconcile(config.market);
       } catch (err) {
         console.warn("[bot-runner] reconcile failed", { botId, error: (err as Error).message });
       }
     }
+  }
+
+  private async cancelOpenOrders(botId: string, config: BotConfig, runId: string | undefined, reason: string) {
+    try {
+      const connector = await this.getConnector(botId, config);
+      const before = await connector.getOpenOrders(config.market);
+      console.info("[bot-runner] cancel all preflight", { botId, market: config.market, openOnVenue: before.length });
+      const intent = {
+        id: randomUUID(),
+        botId,
+        kind: "cancel_all" as const,
+        createdAt: new Date().toISOString(),
+        symbol: config.market,
+        reason
+      };
+      const result = await connector.cancelAll(intent);
+      if (!result.ok) {
+        console.warn("[bot-runner] cancel all failed", { botId, error: result.error });
+        return;
+      }
+      const canceledCount = result.meta?.canceled ?? 0;
+      if (canceledCount === 0) {
+        console.warn("[bot-runner] cancel all returned zero orders", { botId, market: config.market });
+        return;
+      }
+      const after = await connector.getOpenOrders(config.market);
+      console.info("[bot-runner] cancel all postflight", { botId, market: config.market, openOnVenue: after.length });
+      await this.syncOpenOrders(botId, config.market, runId, "stop_cancel");
+    } catch (err) {
+      console.warn("[bot-runner] cancel all error", { botId, error: (err as Error).message });
+    }
+  }
+
+  private async syncOpenOrders(botId: string, market: string, runId: string | undefined, reason: string) {
+    try {
+      const config = this.bots.getConfig(botId);
+      if (!config) {
+        return;
+      }
+      const connector = await this.getConnector(botId, config);
+      const venueOpen = await connector.getOpenOrders(market);
+      const openIds = new Set(venueOpen.map((order) => order.externalId ?? order.orderId));
+      const dbOpen = await this.persistence.listOpenOrders(botId);
+      let canceled = 0;
+      for (const order of dbOpen) {
+        if (!order.externalId) {
+          continue;
+        }
+        if (!openIds.has(order.externalId)) {
+          const event: OrderEvent = {
+            id: randomUUID(),
+            version: "v1",
+            kind: "order",
+            ts: new Date().toISOString(),
+            source: "internal",
+            botId,
+            orderId: order.id,
+            venue: order.venue,
+            externalId: order.externalId ?? undefined,
+            side: order.side as "buy" | "sell",
+            price: order.price.toString(),
+            size: order.size.toString(),
+            status: "canceled"
+          };
+          await this.persistence.logEvent(event, { market: order.market, runId });
+          await this.persistence.updateOrderStatus(order.id, "canceled", event.ts);
+          await this.bus.publishBotEvent(event);
+          canceled += 1;
+        }
+      }
+      console.info("[bot-runner] sync open orders", { botId, market, reason, openOnVenue: openIds.size, canceled });
+    } catch (err) {
+      console.warn("[bot-runner] sync open orders error", { botId, market, reason, error: (err as Error).message });
+    }
+  }
+
+  private async loadPerpsRiskConfig() {
+    const stored = await this.persistence.getPerpsRiskConfig();
+    if (stored?.config && typeof stored.config === "object") {
+      this.perpsRiskConfig = {
+        ...DEFAULT_PERPS_RISK_CONFIG,
+        ...(stored.config as Record<string, unknown>)
+      } as typeof DEFAULT_PERPS_RISK_CONFIG;
+    }
+  }
+
+  private async getExecutionEngine(botId: string, config: BotConfig) {
+    if (!this.config.executionEnabled || this.config.executionMode === "disabled") {
+      return this.noopExecution;
+    }
+    if (this.config.executionMode === "simulated") {
+      return this.simulatedExecution;
+    }
+    if (isPerpsBot(config)) {
+      return this.ensurePerpsExecution(botId);
+    }
+    return this.spotExecution;
+  }
+
+  private async getConnector(botId: string, config: BotConfig) {
+    if (!this.config.executionEnabled || this.config.executionMode === "disabled") {
+      return this.noopConnector;
+    }
+    if (this.config.executionMode === "simulated") {
+      return this.simulatedConnector;
+    }
+    if (isPerpsBot(config)) {
+      await this.ensurePerpsExecution(botId);
+      const connector = this.perpsConnectors.get(botId);
+      if (!connector) {
+        throw new Error("perps connector unavailable");
+      }
+      return connector;
+    }
+    return this.spotConnector;
+  }
+
+  private async ensurePerpsExecution(botId: string) {
+    const existing = this.perpsExecutions.get(botId);
+    if (existing) {
+      return existing;
+    }
+    if (!this.config.walletPubkey) {
+      throw new Error("BOT_WALLET_PUBKEY is required for perps bots");
+    }
+    const account = await this.persistence.ensurePerpsAccount(botId, this.config.walletPubkey, "drift");
+    if (!account) {
+      throw new Error("perps account unavailable");
+    }
+    const connector = new DriftPerpsConnector({
+      rpcUrl: this.config.solanaRpcUrl,
+      privateKey: this.config.solanaPrivateKey,
+      env: this.config.driftEnv,
+      subaccountId: account.subaccountId
+    });
+    const execution = new ExecutionEngine(connector);
+    this.perpsConnectors.set(botId, connector);
+    this.perpsExecutions.set(botId, execution);
+    return execution;
+  }
+
+  private async processFillFromTx(event: WalletTxEvent) {
+    if (!this.config.walletPubkey) {
+      return;
+    }
+    if (await this.persistence.fillExists(event.signature)) {
+      return;
+    }
+    const tx = await fetchTransaction(this.config.solanaRpcUrl, event.signature);
+    if (!tx) {
+      return;
+    }
+    const parsed = parseFillFromTransaction(tx, this.config.walletPubkey);
+    if (!parsed) {
+      return;
+    }
+    const { quoteSymbol, quoteDelta, side } = parsed;
+    const openOrders = await this.persistence.listOpenOrdersByQuote(quoteSymbol);
+    const matched = matchOrder(openOrders, side, quoteDelta);
+    if (!matched) {
+      console.warn("[bot-runner] fill without matching order", {
+        signature: event.signature,
+        quoteSymbol,
+        side,
+        quoteDelta
+      });
+      return;
+    }
+
+    const orderPrice = Number(matched.price);
+    const orderSize = Number(matched.size);
+    if (!Number.isFinite(orderPrice) || !Number.isFinite(orderSize)) {
+      return;
+    }
+    const qty = Math.min(Math.abs(quoteDelta) / orderPrice, orderSize);
+    const price = orderPrice;
+    const fillEvent: FillEvent = {
+      id: randomUUID(),
+      version: "v1",
+      kind: "fill",
+      ts: new Date().toISOString(),
+      source: "rpc",
+      botId: matched.botId,
+      orderId: matched.id,
+      venue: matched.venue,
+      externalId: matched.externalId ?? undefined,
+      side,
+      price: price.toFixed(6),
+      qty: qty.toFixed(6),
+      txSig: event.signature
+    };
+    await this.persistence.logEvent(fillEvent, { market: matched.market, runId: matched.runId ?? undefined });
+    await this.persistence.updateOrderStatus(matched.id, "filled", fillEvent.ts);
+    await this.bus.publishBotEvent(fillEvent);
+  }
+
+  private maybeSnapshot(state: BotState) {
+    if (!this.config.persistenceEnabled) {
+      return;
+    }
+    const now = Date.now();
+    const last = this.lastSnapshotAt.get(state.botId) ?? 0;
+    if (now - last < this.config.snapshotIntervalMs) {
+      return;
+    }
+    this.lastSnapshotAt.set(state.botId, now);
+    void this.persistence.saveBotSnapshot(state);
   }
 
   private async checkHealth() {
@@ -296,6 +633,59 @@ export class BotRunnerService {
       await this.bus.publishBotEvent(fillEvent);
     }
   }
+
+  private async maybeAccountSnapshot() {
+    if (!this.config.persistenceEnabled || !this.config.walletPubkey) {
+      return;
+    }
+    if (this.walletBalances.size === 0) {
+      return;
+    }
+    const now = Date.now();
+    if (now - this.lastAccountSnapshotAt < this.config.accountSnapshotIntervalMs) {
+      return;
+    }
+    this.lastAccountSnapshotAt = now;
+    const snapshot = this.buildAccountSnapshot(this.config.walletPubkey);
+    await this.persistence.saveAccountSnapshot(snapshot);
+  }
+
+  private buildAccountSnapshot(walletId: string) {
+    const balances = Array.from(this.walletBalances.entries()).map(([mint, entry]) => {
+      const token = getTokenByMint(mint, this.config.solanaCluster);
+      const symbol = token?.symbol ?? null;
+      const amount = entry.balance;
+      const priceUsd = resolveUsdPrice(symbol, this.market);
+      const numericAmount = Number(amount);
+      const usdValue =
+        priceUsd !== null && Number.isFinite(numericAmount) ? (numericAmount * priceUsd).toFixed(2) : null;
+      return {
+        mint,
+        symbol,
+        amount,
+        priceUsd: priceUsd !== null ? priceUsd.toFixed(6) : null,
+        usdValue
+      };
+    });
+
+    const equity = balances.reduce((total, balance) => {
+      const value = balance.usdValue ? Number(balance.usdValue) : 0;
+      return Number.isFinite(value) ? total + value : total;
+    }, 0);
+
+    balances.sort((a, b) => {
+      const aValue = a.usdValue ? Number(a.usdValue) : 0;
+      const bValue = b.usdValue ? Number(b.usdValue) : 0;
+      return bValue - aValue;
+    });
+
+    return {
+      walletId,
+      ts: new Date().toISOString(),
+      equity: Number.isFinite(equity) ? equity.toFixed(2) : null,
+      balances
+    };
+  }
 }
 
 function parseEnvelope(message: string): RedisEnvelope<NormalizedEvent> | null {
@@ -320,4 +710,179 @@ function parseCommand(message: string): BotCommand | null {
   } catch {
     return null;
   }
+}
+
+function resolveMarketSymbol(config: BotConfig) {
+  if (config.grid?.symbol) {
+    return config.grid.symbol;
+  }
+  if (config.perps?.simpleGrid?.symbol) {
+    return config.perps.simpleGrid.symbol;
+  }
+  if (config.perps?.curveGrid?.symbol) {
+    return config.perps.curveGrid.symbol;
+  }
+  if (config.marketMaker?.symbol) {
+    return config.marketMaker.symbol;
+  }
+  if (config.market?.includes("/")) {
+    return config.market.split("/")[0];
+  }
+  return config.market || null;
+}
+
+function isPerpsBot(config: BotConfig) {
+  const kind = config.kind ?? (config.venue === "drift_perps" ? "drift_perps" : "spot");
+  return kind === "drift_perps";
+}
+
+function resolveUsdPrice(symbol: string | null, market: MarketStateStore) {
+  if (!symbol) {
+    return null;
+  }
+  if (symbol === "USDC" || symbol === "USDT" || symbol === "USD") {
+    return 1;
+  }
+  const marketState = market.get(symbol);
+  if (!marketState?.lastPrice) {
+    return null;
+  }
+  const parsed = Number(marketState.lastPrice);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+const TOKEN_MINTS = {
+  SOL: { symbol: "SOL", mint: "So11111111111111111111111111111111111111112" },
+  USDC: { symbol: "USDC", mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" },
+  USDT: { symbol: "USDT", mint: "Es9vMFrzaCER1a6c7fggkP6yqoCqkf9rD8qt4V9rW" }
+} as const;
+
+const MINT_TO_SYMBOL = new Map(Object.values(TOKEN_MINTS).map((token) => [token.mint, token.symbol]));
+
+type ParsedFill = {
+  quoteSymbol: string;
+  quoteDelta: number;
+  side: "buy" | "sell";
+};
+
+async function fetchTransaction(rpcUrl: string, signature: string) {
+  const body = {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "getTransaction",
+    params: [signature, { encoding: "jsonParsed", maxSupportedTransactionVersion: 0 }]
+  };
+  const response = await fetch(rpcUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  if (!response.ok) {
+    return null;
+  }
+  const payload = (await response.json()) as { result?: any };
+  return payload?.result ?? null;
+}
+
+function parseFillFromTransaction(tx: any, wallet: string): ParsedFill | null {
+  const meta = tx?.meta;
+  const message = tx?.transaction?.message;
+  if (!meta || !message) {
+    return null;
+  }
+  const preTokens = buildTokenMap(meta.preTokenBalances, wallet);
+  const postTokens = buildTokenMap(meta.postTokenBalances, wallet);
+
+  const deltas = new Map<string, number>();
+  for (const [mint, amount] of postTokens.entries()) {
+    const before = preTokens.get(mint) ?? 0;
+    deltas.set(mint, amount - before);
+  }
+  for (const [mint, amount] of preTokens.entries()) {
+    if (!deltas.has(mint)) {
+      deltas.set(mint, 0 - amount);
+    }
+  }
+
+  const quoteMint = deltas.has(TOKEN_MINTS.USDC.mint)
+    ? TOKEN_MINTS.USDC.mint
+    : deltas.has(TOKEN_MINTS.USDT.mint)
+      ? TOKEN_MINTS.USDT.mint
+      : null;
+
+  if (!quoteMint) {
+    return null;
+  }
+
+  const quoteDelta = deltas.get(quoteMint) ?? 0;
+  if (quoteDelta === 0) {
+    return null;
+  }
+  const side: "buy" | "sell" = quoteDelta < 0 ? "buy" : "sell";
+  const quoteSymbol = MINT_TO_SYMBOL.get(quoteMint) ?? "USDC";
+
+  if (!Number.isFinite(quoteDelta)) {
+    return null;
+  }
+
+  return { quoteSymbol, quoteDelta, side };
+}
+
+function buildTokenMap(entries: any[] | undefined, owner: string) {
+  const map = new Map<string, number>();
+  for (const entry of entries ?? []) {
+    if (entry?.owner !== owner) {
+      continue;
+    }
+    const mint = entry?.mint;
+    const amount = entry?.uiTokenAmount?.uiAmountString;
+    if (!mint || amount === undefined || amount === null) {
+      continue;
+    }
+    const numeric = Number(amount);
+    if (!Number.isFinite(numeric)) {
+      continue;
+    }
+    map.set(mint, numeric);
+  }
+  return map;
+}
+
+function matchOrder(
+  orders: Array<{
+    id: string;
+    botId: string;
+    runId?: string | null;
+    venue: string;
+    market: string;
+    externalId?: string | null;
+    side: string;
+    price: any;
+    size: any;
+  }>,
+  side: "buy" | "sell",
+  quoteDelta: number
+) {
+  const targetQuote = Math.abs(quoteDelta);
+  const candidates = orders.filter((order) => order.side === side);
+  let best: typeof candidates[number] | null = null;
+  let bestScore = Number.POSITIVE_INFINITY;
+
+  for (const order of candidates) {
+    const orderPrice = Number(order.price);
+    const orderSize = Number(order.size);
+    if (!Number.isFinite(orderPrice) || !Number.isFinite(orderSize)) {
+      continue;
+    }
+    const expectedQuote = orderPrice * orderSize;
+    const quoteDiff = Math.abs(expectedQuote - targetQuote) / targetQuote;
+    if (quoteDiff > 0.25) {
+      continue;
+    }
+    if (quoteDiff < bestScore) {
+      bestScore = quoteDiff;
+      best = order;
+    }
+  }
+  return best;
 }

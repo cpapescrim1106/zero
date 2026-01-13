@@ -16,6 +16,7 @@
     "@zero/core": "workspace:*",
     "@zero/db": "workspace:*",
     "@zero/strategies": "workspace:*",
+    "dotenv": "^16.4.5",
     "fastify": "^4.28.1",
     "ioredis": "^5.4.1"
   },

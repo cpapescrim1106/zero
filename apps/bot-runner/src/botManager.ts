@@ -166,6 +166,15 @@ function matchesSymbol(config: BotConfig, symbol: string) {
   if (config.grid?.symbol === symbol) {
     return true;
   }
+  if (config.perps?.simpleGrid?.symbol === symbol) {
+    return true;
+  }
+  if (config.perps?.curveGrid?.symbol === symbol) {
+    return true;
+  }
+  if (config.marketMaker?.symbol === symbol) {
+    return true;
+  }
   if (!config.market) {
     return false;
   }

@@ -1,6 +1,15 @@
+import fs from "fs";
+import path from "path";
+import dotenv from "dotenv";
 import { buildServer } from "./server";
 import { loadConfig } from "./config";
 import { BotRunnerService } from "./runnerService";
+
+const defaultEnvPath = path.resolve(process.cwd(), ".env.local");
+const fallbackEnvPath = path.resolve(process.cwd(), "apps/bot-runner/.env.local");
+const envPath =
+  process.env.ENV_PATH ?? (fs.existsSync(defaultEnvPath) ? defaultEnvPath : fallbackEnvPath);
+dotenv.config({ path: envPath });
 
 const config = loadConfig();
 const server = buildServer();
