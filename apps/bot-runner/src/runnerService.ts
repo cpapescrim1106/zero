@@ -1,4 +1,5 @@
-import type { BotCommand, BotConfig, BotState, NormalizedEvent, PriceEvent, RedisEnvelope } from "@zero/core";
+import { randomUUID } from "crypto";
+import type { BotCommand, BotConfig, BotState, FillEvent, NormalizedEvent, PriceEvent, RedisEnvelope } from "@zero/core";
 import { CACHE_KEYS } from "@zero/core";
 import { JupiterLimitOrderConnector } from "@zero/connectors";
 import type { Strategy } from "@zero/strategies";
@@ -7,10 +8,12 @@ import { BotManager } from "./botManager";
 import { ExecutionEngine } from "./executionEngine";
 import { IntentEngine } from "./intentEngine";
 import { MarketStateStore } from "./marketState";
+import { NoopConnector } from "./noopConnector";
 import { Persistence } from "./persistence";
 import { RedisBus } from "./redisBus";
 import { RiskGovernor } from "./riskGovernor";
 import { isScheduleActive } from "./schedule";
+import { SimulatedConnector } from "./simulatedConnector";
 import { buildStrategyRegistry } from "./strategyRegistry";
 
 export class BotRunnerService {
@@ -21,7 +24,7 @@ export class BotRunnerService {
   private risk = new RiskGovernor();
   private execution: ExecutionEngine;
   private strategies = buildStrategyRegistry();
-  private connector: JupiterLimitOrderConnector;
+  private connector: JupiterLimitOrderConnector | NoopConnector | SimulatedConnector;
   private persistence: Persistence;
   private lastMarketEventAt = Date.now();
   private heartbeatTimer?: NodeJS.Timeout;
@@ -30,10 +33,20 @@ export class BotRunnerService {
 
   constructor(private config: BotRunnerConfig) {
     this.bus = new RedisBus(config.redisUrl);
-    this.connector = new JupiterLimitOrderConnector({
-      apiUrl: config.jupiterApiUrl,
-      privateKey: config.solanaPrivateKey
-    });
+    if (!config.executionEnabled || config.executionMode === "disabled") {
+      this.connector = new NoopConnector();
+    } else if (config.executionMode === "simulated") {
+      this.connector = new SimulatedConnector();
+    } else {
+      this.connector = new JupiterLimitOrderConnector({
+        rpcUrl: config.solanaRpcUrl,
+        privateKey: config.solanaPrivateKey,
+        cluster: config.solanaCluster,
+        apiUrl: config.jupiterTriggerApiUrl,
+        apiKey: config.jupiterApiKey,
+        computeUnitPrice: config.jupiterComputeUnitPrice
+      });
+    }
     this.execution = new ExecutionEngine(this.connector);
     this.persistence = new Persistence(config.databaseUrl, config.persistenceEnabled);
   }
@@ -108,7 +121,11 @@ export class BotRunnerService {
   private async loadBots() {
     const bots = await this.persistence.listBots();
     for (const bot of bots) {
-      const state = this.bots.setConfig(bot.id, bot.config as BotConfig, bot.status as BotState["status"]);
+      const state = this.bots.setConfig(
+        bot.id,
+        bot.config as unknown as BotConfig,
+        bot.status as BotState["status"]
+      );
       await this.bus.setCache(CACHE_KEYS.bot(bot.id), state);
     }
     await this.refreshSchedules();
@@ -127,6 +144,9 @@ export class BotRunnerService {
     for (const state of updated) {
       void this.bus.setCache(CACHE_KEYS.bot(state.botId), state);
       void this.evaluateBot(state.botId);
+      if (this.config.executionMode === "simulated") {
+        void this.simulateFills(state.botId, event.price);
+      }
     }
   }
 
@@ -152,10 +172,18 @@ export class BotRunnerService {
       return;
     }
 
+    const openOrders = await this.persistence.listOpenOrders(botId);
     const intents = await this.intents.run(strategy, {
       botConfig: config,
       botState: state,
-      market
+      market,
+      openOrders: openOrders.map((order) => ({
+        id: order.id,
+        side: order.side as "buy" | "sell",
+        price: order.price.toString(),
+        size: order.size.toString(),
+        status: order.status as "new" | "open" | "partial" | "filled" | "canceled" | "rejected"
+      }))
     });
 
     const decision = this.risk.evaluate(state.risk, intents, botId);
@@ -176,7 +204,7 @@ export class BotRunnerService {
     for (const event of execution.events) {
       if (event.botId) {
         await this.bus.publishBotEvent(event);
-        await this.persistence.logEvent(event);
+        await this.persistence.logEvent(event, { market: config.market, runId: state.runId });
       }
     }
   }
@@ -230,6 +258,43 @@ export class BotRunnerService {
       stale ? "degraded" : "ok",
       stale ? "market-data stale" : undefined
     );
+  }
+
+  private async simulateFills(botId: string, price: string) {
+    const openOrders = await this.persistence.listOpenOrders(botId);
+    const numericPrice = Number(price);
+    if (!Number.isFinite(numericPrice)) {
+      return;
+    }
+    for (const order of openOrders) {
+      const orderPrice = Number(order.price);
+      if (!Number.isFinite(orderPrice)) {
+        continue;
+      }
+      const shouldFill =
+        (order.side === "buy" && numericPrice <= orderPrice) ||
+        (order.side === "sell" && numericPrice >= orderPrice);
+      if (!shouldFill) {
+        continue;
+      }
+      const fillEvent: FillEvent = {
+        id: randomUUID(),
+        version: "v1",
+        kind: "fill",
+        ts: new Date().toISOString(),
+        source: "internal" as const,
+        botId,
+        orderId: order.id,
+        venue: order.venue,
+        externalId: order.externalId ?? undefined,
+        side: order.side as "buy" | "sell",
+        price: order.price.toString(),
+        qty: order.size.toString()
+      };
+      await this.persistence.logEvent(fillEvent, { market: order.market, runId: order.runId ?? undefined });
+      await this.persistence.updateOrderStatus(order.id, "filled", fillEvent.ts);
+      await this.bus.publishBotEvent(fillEvent);
+    }
   }
 }
 
