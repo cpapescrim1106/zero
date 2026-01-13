@@ -1,13 +1,13 @@
 "use client";
 
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo } from "react";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
-import { createBot, type CreateBotPayload, type BotResponse } from "../../../../lib/api";
-import { computeGridSizing, type BudgetMode } from "../../../../lib/gridSizing";
+import { fetchBot, updateBot, type BotResponse, type UpdateBotPayload } from "../../../../../lib/api";
+import { computeGridSizing, type BudgetMode } from "../../../../../lib/gridSizing";
 
 const botSchema = z
   .object({
@@ -44,7 +44,8 @@ const botSchema = z
     targetBase: z.string().optional(),
     minBase: z.string().optional(),
     maxBase: z.string().optional(),
-    preferredBase: z.string().optional()
+    preferredBase: z.string().optional(),
+    cancelOpenOrders: z.boolean().optional()
   })
   .superRefine((values, ctx) => {
     const isPerps = values.botKind === "drift_perps";
@@ -112,12 +113,16 @@ const botSchema = z
 
 type BotForm = z.infer<typeof botSchema>;
 
-export default function NewBotPage() {
+export default function EditBotPage({ params }: { params: { id: string } }) {
   const router = useRouter();
-  const mutation = useMutation<BotResponse, Error, CreateBotPayload>({
-    mutationFn: createBot,
-    onSuccess: (data) => {
-      router.push(`/bots/${data.bot.id}`);
+  const { data, isLoading } = useQuery({
+    queryKey: ["bot", params.id],
+    queryFn: () => fetchBot(params.id)
+  });
+  const mutation = useMutation<BotResponse, Error, UpdateBotPayload>({
+    mutationFn: (payload) => updateBot(params.id, payload),
+    onSuccess: (response) => {
+      router.push(`/bots/${response.bot.id}`);
     }
   });
   const form = useForm<BotForm>({
@@ -127,8 +132,8 @@ export default function NewBotPage() {
       botKind: "spot",
       market: "SOL/USDC",
       strategyKey: "spot_grid_static",
-      lowerPrice: "120",
-      upperPrice: "180",
+      lowerPrice: "",
+      upperPrice: "",
       gridCount: 12,
       orderSize: "0.1",
       maxQuoteBudget: "",
@@ -150,9 +155,63 @@ export default function NewBotPage() {
       targetBase: "",
       minBase: "",
       maxBase: "",
-      preferredBase: ""
+      preferredBase: "",
+      cancelOpenOrders: true
     }
   });
+
+  useEffect(() => {
+    const bot = data?.bot;
+    if (!bot) {
+      return;
+    }
+    const config = bot.config ?? {};
+    const grid = (config as { grid?: Record<string, unknown> }).grid ?? {};
+    const marketMaker = (config as { marketMaker?: Record<string, unknown> }).marketMaker ?? {};
+    const perps = (config as { perps?: Record<string, unknown>; kind?: string }).perps ?? {};
+    const perpsSimple = (perps as { simpleGrid?: Record<string, unknown> }).simpleGrid ?? {};
+    const perpsCurve = (perps as { curveGrid?: Record<string, unknown> }).curveGrid ?? {};
+    const perpsTarget = (perps as { targetPosition?: Record<string, unknown> }).targetPosition ?? {};
+    const perpsBand = (perps as { exposureBand?: Record<string, unknown> }).exposureBand ?? {};
+    const kind = (config as { kind?: string }).kind ?? (bot.venue === "drift_perps" ? "drift_perps" : "spot");
+    form.reset({
+      name: bot.name,
+      botKind: kind === "drift_perps" ? "drift_perps" : "spot",
+      market: bot.market,
+      strategyKey: bot.strategyKey as BotForm["strategyKey"],
+      lowerPrice: String(grid.lowerPrice ?? ""),
+      upperPrice: String(grid.upperPrice ?? ""),
+      gridCount: grid.gridCount ? Number(grid.gridCount) : undefined,
+      orderSize: String(grid.orderSize ?? ""),
+      maxQuoteBudget: String(grid.maxQuoteBudget ?? ""),
+      maxBaseBudget: String(grid.maxBaseBudget ?? ""),
+      budgetMode: "per_order",
+      budgetQuote: "",
+      budgetBase: "",
+      budgetTotalUsd: "",
+      makerLevels: marketMaker.levels ? Number(marketMaker.levels) : undefined,
+      makerOrderSize: String(marketMaker.orderSize ?? ""),
+      halfSpreadBps: marketMaker.halfSpreadBps ? Number(marketMaker.halfSpreadBps) : undefined,
+      levelSpacingBps: marketMaker.levelSpacingBps ? Number(marketMaker.levelSpacingBps) : undefined,
+      refreshSeconds: marketMaker.refreshSeconds ? Number(marketMaker.refreshSeconds) : undefined,
+      repriceBps: marketMaker.repriceBps ? Number(marketMaker.repriceBps) : undefined,
+      perpsLevels: perpsCurve.levels ? Number(perpsCurve.levels) : undefined,
+      perpsStepPercent: perpsCurve.stepPercent ? Number(perpsCurve.stepPercent) : undefined,
+      perpsBaseSize: String(perpsCurve.baseSize ?? ""),
+      perpsBias: (perpsCurve.bias as "bullish" | "neutral" | "bearish") ?? "neutral",
+      targetBase: String(perpsTarget.base ?? ""),
+      minBase: String(perpsBand.minBase ?? ""),
+      maxBase: String(perpsBand.maxBase ?? ""),
+      preferredBase: String(perpsBand.preferredBase ?? ""),
+      cancelOpenOrders: true
+    });
+    if (kind === "drift_perps" && Object.keys(perpsSimple).length > 0) {
+      form.setValue("lowerPrice", String(perpsSimple.lowerPrice ?? ""));
+      form.setValue("upperPrice", String(perpsSimple.upperPrice ?? ""));
+      form.setValue("gridCount", perpsSimple.gridCount ? Number(perpsSimple.gridCount) : undefined);
+      form.setValue("orderSize", String(perpsSimple.orderSize ?? ""));
+    }
+  }, [data, form]);
 
   const onSubmit = form.handleSubmit(async (values) => {
     const isPerps = values.botKind === "drift_perps";
@@ -172,6 +231,7 @@ export default function NewBotPage() {
       strategyKey: values.strategyKey,
       venue,
       market: values.market,
+      cancelOpenOrders: values.cancelOpenOrders ?? true,
       config: {
         name: values.name,
         strategyKey: values.strategyKey,
@@ -304,16 +364,17 @@ export default function NewBotPage() {
     }
   };
 
+  if (isLoading) {
+    return <div className="rounded-xl border border-border bg-panel/90 p-6">Loading bot...</div>;
+  }
+
   return (
     <section className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
-      <form
-        onSubmit={onSubmit}
-        className="rounded-xl border border-border bg-panel/90 p-6 shadow-card"
-      >
+      <form onSubmit={onSubmit} className="rounded-xl border border-border bg-panel/90 p-6 shadow-card">
         <div className="grid gap-6">
           <div>
-            <h3 className="text-xl font-semibold">Create Bot</h3>
-            <p className="mt-2 text-sm text-muted">Define the grid parameters and launch.</p>
+            <h3 className="text-xl font-semibold">Edit Bot</h3>
+            <p className="mt-2 text-sm text-muted">Update parameters and refresh the strategy.</p>
           </div>
 
           <div className="grid gap-4 md:grid-cols-2">
@@ -417,32 +478,17 @@ export default function NewBotPage() {
               </Field>
               {!isPerps && budgetMode === "total_quote" ? (
                 <Field label="Total quote budget (USDC)">
-                  <div className="flex gap-2">
-                    <input className="input" {...form.register("budgetQuote")} />
-                    <button type="button" className="btn-outline" onClick={handleCalculate}>
-                      Calculate
-                    </button>
-                  </div>
+                  <input className="input" {...form.register("budgetQuote")} />
                 </Field>
               ) : null}
               {!isPerps && budgetMode === "total_base" ? (
                 <Field label="Total base budget (SOL)">
-                  <div className="flex gap-2">
-                    <input className="input" {...form.register("budgetBase")} />
-                    <button type="button" className="btn-outline" onClick={handleCalculate}>
-                      Calculate
-                    </button>
-                  </div>
+                  <input className="input" {...form.register("budgetBase")} />
                 </Field>
               ) : null}
               {!isPerps && budgetMode === "total_usd" ? (
                 <Field label="Total budget (USD)">
-                  <div className="flex gap-2">
-                    <input className="input" {...form.register("budgetTotalUsd")} />
-                    <button type="button" className="btn-outline" onClick={handleCalculate}>
-                      Calculate
-                    </button>
-                  </div>
+                  <input className="input" {...form.register("budgetTotalUsd")} />
                 </Field>
               ) : null}
               {!isPerps && (
@@ -478,16 +524,19 @@ export default function NewBotPage() {
             </div>
           )}
 
+          <label className="flex items-center gap-3 text-sm text-muted">
+            <input type="checkbox" className="h-4 w-4" {...form.register("cancelOpenOrders")} />
+            Cancel open orders after save (recommended when changing sizes).
+          </label>
+
           <button
             type="submit"
             disabled={mutation.isPending}
             className="rounded-full bg-accent px-6 py-2 text-sm font-semibold text-white shadow-glow disabled:opacity-60"
           >
-            {mutation.isPending ? "Creating..." : "Create bot"}
+            {mutation.isPending ? "Saving..." : "Save changes"}
           </button>
-          {mutation.error ? (
-            <p className="text-sm text-red-600">Failed to create bot.</p>
-          ) : null}
+          {mutation.error ? <p className="text-sm text-red-600">Failed to update bot.</p> : null}
         </div>
       </form>
 
@@ -526,16 +575,15 @@ export default function NewBotPage() {
           <p className="text-xs uppercase tracking-[0.3em] text-muted">Guidance</p>
           <p className="mt-3 text-sm text-text">
             {isPerps
-              ? "Perps bots use leverage. Keep exposure bands tight until you’ve validated funding and risk settings."
-              : "Grid runs bracket the price; slow market maker posts fewer, wider levels and refreshes on a timer or drift threshold."}
+              ? "Perps edits apply on the next evaluation tick. Tighten exposure bands before increasing leverage."
+              : "Edits apply on the next evaluation tick. If you change sizes or levels, canceling open orders helps avoid duplicates."}
           </p>
         </div>
         <div className="rounded-xl border border-border bg-white/70 p-5">
-          <p className="text-xs uppercase tracking-[0.3em] text-muted">Risk defaults</p>
+          <p className="text-xs uppercase tracking-[0.3em] text-muted">Notes</p>
           <ul className="mt-3 space-y-2 text-sm text-muted">
-            <li>Max notional and inventory will stop the bot immediately.</li>
-            <li>Stale data timeout defaults to 30 seconds.</li>
-            <li>Execution stays off until you flip EXECUTION_ENABLED.</li>
+            <li>Market/venue changes will rebuild orders from the new config.</li>
+            <li>For live bots, keep an eye on rejected orders after a change.</li>
           </ul>
         </div>
       </div>

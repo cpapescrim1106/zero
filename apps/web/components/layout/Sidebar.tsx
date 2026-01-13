@@ -3,6 +3,7 @@ import Link from "next/link";
 const navItems = [
   { href: "/bots", label: "Bots" },
   { href: "/bots/new", label: "Create Bot" },
+  { href: "/perps/settings", label: "Perps Settings" },
   { href: "/account", label: "Account" }
 ];
 

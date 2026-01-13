@@ -30,6 +30,7 @@ export default function BotsPage() {
 
   const bots = data?.bots ?? [];
   const metrics = summarizeBots(bots);
+  const { spotBots, perpsBots } = splitBots(bots);
 
   return (
     <section className="flex flex-col gap-6">
@@ -54,94 +55,44 @@ export default function BotsPage() {
         </Link>
       </div>
 
-      <div className="overflow-hidden rounded-xl border border-border bg-panel/90 shadow-card">
-        <table className="w-full text-left text-sm">
-          <thead className="border-b border-border text-xs uppercase tracking-[0.2em] text-muted">
-            <tr>
-              <th className="px-6 py-4">Bot</th>
-              <th className="px-6 py-4">Status</th>
-              <th className="px-6 py-4">Market</th>
-              <th className="px-6 py-4">Strategy</th>
-              <th className="px-6 py-4">Last update</th>
-              <th className="px-6 py-4 text-right">Actions</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-border">
-            {isLoading && (
-              <tr>
-                <td colSpan={6} className="px-6 py-6 text-muted">
-                  Loading bots...
-                </td>
-              </tr>
-            )}
-            {error && (
-              <tr>
-                <td colSpan={6} className="px-6 py-6 text-red-600">
-                  Failed to load bots.
-                </td>
-              </tr>
-            )}
-            {bots.map((bot) => {
-              const status = resolveStatus(bot);
-              return (
-                <tr key={bot.id} className="hover:bg-white/70">
-                  <td className="px-6 py-4">
-                    <Link href={`/bots/${bot.id}`} className="font-semibold text-text">
-                      {bot.name}
-                    </Link>
-                    <p className="text-xs text-muted">{bot.venue}</p>
-                  </td>
-                  <td className="px-6 py-4">
-                    <StatusChip label={status.label} tone={status.tone} />
-                  </td>
-                  <td className="px-6 py-4 text-sm text-muted">{bot.market}</td>
-                  <td className="px-6 py-4 text-xs uppercase tracking-[0.2em] text-muted">
-                    {bot.strategyKey}
-                  </td>
-                  <td className="px-6 py-4 text-xs text-muted">
-                    {bot.runtime?.lastEventAt
-                      ? formatRelative(bot.runtime.lastEventAt)
-                      : "-"}
-                  </td>
-                  <td className="px-6 py-4 text-right">
-                    <div className="flex justify-end gap-2">
-                      {status.action === "start" && (
-                        <ActionButton
-                          label="Start"
-                          onClick={() => commandMutation.mutate({ botId: bot.id, action: "start" })}
-                        />
-                      )}
-                      {status.action === "pause" && (
-                        <ActionButton
-                          label="Pause"
-                          onClick={() => commandMutation.mutate({ botId: bot.id, action: "pause" })}
-                        />
-                      )}
-                      {status.action === "resume" && (
-                        <ActionButton
-                          label="Resume"
-                          onClick={() => commandMutation.mutate({ botId: bot.id, action: "resume" })}
-                        />
-                      )}
-                      <ActionButton
-                        label="Stop"
-                        tone="danger"
-                        onClick={() => {
-                          if (confirm(`Stop ${bot.name}? This cancels all orders.`)) {
-                            commandMutation.mutate({ botId: bot.id, action: "stop" });
-                          }
-                        }}
-                      />
-                    </div>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+      <BotsTable
+        title="Spot bots"
+        description="Jupiter spot strategies and market makers."
+        bots={spotBots}
+        isLoading={isLoading}
+        error={Boolean(error)}
+        onCommand={(botId, action) => commandMutation.mutate({ botId, action })}
+      />
+
+      <BotsTable
+        title="Perps bots"
+        description="Drift perps bots with leverage controls."
+        bots={perpsBots}
+        isLoading={isLoading}
+        error={Boolean(error)}
+        onCommand={(botId, action) => commandMutation.mutate({ botId, action })}
+      />
     </section>
   );
+}
+
+function splitBots(bots: ApiBot[]) {
+  const spotBots: ApiBot[] = [];
+  const perpsBots: ApiBot[] = [];
+  for (const bot of bots) {
+    if (isPerpsBot(bot)) {
+      perpsBots.push(bot);
+    } else {
+      spotBots.push(bot);
+    }
+  }
+  return { spotBots, perpsBots };
+}
+
+function isPerpsBot(bot: ApiBot) {
+  const config = bot.config as { kind?: string } | undefined;
+  const kind = config?.kind ?? (bot.venue === "drift_perps" ? "drift_perps" : "spot");
+  return kind === "drift_perps";
 }
 
 function summarizeBots(bots: ApiBot[]) {
@@ -201,5 +152,113 @@ function ActionButton({
     <button type="button" onClick={onClick} className={className}>
       {label}
     </button>
+  );
+}
+
+function BotsTable({
+  title,
+  description,
+  bots,
+  isLoading,
+  error,
+  onCommand
+}: {
+  title: string;
+  description: string;
+  bots: ApiBot[];
+  isLoading: boolean;
+  error: boolean;
+  onCommand: (botId: string, action: string) => void;
+}) {
+  return (
+    <div className="overflow-hidden rounded-xl border border-border bg-panel/90 shadow-card">
+      <div className="flex items-center justify-between gap-4 border-b border-border px-6 py-5">
+        <div>
+          <h4 className="text-base font-semibold text-text">{title}</h4>
+          <p className="text-xs text-muted">{description}</p>
+        </div>
+        <p className="text-xs uppercase tracking-[0.2em] text-muted">{bots.length} total</p>
+      </div>
+      <table className="w-full text-left text-sm">
+        <thead className="border-b border-border text-xs uppercase tracking-[0.2em] text-muted">
+          <tr>
+            <th className="px-6 py-4">Bot</th>
+            <th className="px-6 py-4">Status</th>
+            <th className="px-6 py-4">Market</th>
+            <th className="px-6 py-4">Strategy</th>
+            <th className="px-6 py-4">Last update</th>
+            <th className="px-6 py-4 text-right">Actions</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-border">
+          {isLoading && (
+            <tr>
+              <td colSpan={6} className="px-6 py-6 text-muted">
+                Loading bots...
+              </td>
+            </tr>
+          )}
+          {error && !isLoading && (
+            <tr>
+              <td colSpan={6} className="px-6 py-6 text-red-600">
+                Failed to load bots.
+              </td>
+            </tr>
+          )}
+          {!isLoading && !error && bots.length === 0 && (
+            <tr>
+              <td colSpan={6} className="px-6 py-6 text-muted">
+                No bots yet.
+              </td>
+            </tr>
+          )}
+          {bots.map((bot) => {
+            const status = resolveStatus(bot);
+            return (
+              <tr key={bot.id} className="hover:bg-white/70">
+                <td className="px-6 py-4">
+                  <Link href={`/bots/${bot.id}`} className="font-semibold text-text">
+                    {bot.name}
+                  </Link>
+                  <p className="text-xs text-muted">{bot.venue}</p>
+                </td>
+                <td className="px-6 py-4">
+                  <StatusChip label={status.label} tone={status.tone} />
+                </td>
+                <td className="px-6 py-4 text-sm text-muted">{bot.market}</td>
+                <td className="px-6 py-4 text-xs uppercase tracking-[0.2em] text-muted">
+                  {bot.strategyKey}
+                </td>
+                <td className="px-6 py-4 text-xs text-muted">
+                  {bot.runtime?.lastEventAt ? formatRelative(bot.runtime.lastEventAt) : "-"}
+                </td>
+                <td className="px-6 py-4 text-right">
+                  <div className="flex justify-end gap-2">
+                    {status.action === "start" && (
+                      <ActionButton label="Start" onClick={() => onCommand(bot.id, "start")} />
+                    )}
+                    {status.action === "pause" && (
+                      <ActionButton label="Pause" onClick={() => onCommand(bot.id, "pause")} />
+                    )}
+                    {status.action === "resume" && (
+                      <ActionButton label="Resume" onClick={() => onCommand(bot.id, "resume")} />
+                    )}
+                    <ActionButton
+                      label="Stop"
+                      tone="danger"
+                      onClick={() => {
+                        if (confirm(`Stop ${bot.name}? This cancels all orders.`)) {
+                          onCommand(bot.id, "stop");
+                        }
+                      }}
+                    />
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
   );
 }

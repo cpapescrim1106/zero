@@ -3,6 +3,7 @@ import Link from "next/link";
 const items = [
   { href: "/bots", label: "Bots" },
   { href: "/bots/new", label: "New" },
+  { href: "/perps/settings", label: "Perps" },
   { href: "/account", label: "Account" }
 ];
 
