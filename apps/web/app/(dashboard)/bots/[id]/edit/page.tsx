@@ -478,17 +478,32 @@ export default function EditBotPage({ params }: { params: { id: string } }) {
               </Field>
               {!isPerps && budgetMode === "total_quote" ? (
                 <Field label="Total quote budget (USDC)">
-                  <input className="input" {...form.register("budgetQuote")} />
+                  <div className="flex gap-2">
+                    <input className="input" {...form.register("budgetQuote")} />
+                    <button type="button" className="btn-outline" onClick={handleCalculate}>
+                      Calculate
+                    </button>
+                  </div>
                 </Field>
               ) : null}
               {!isPerps && budgetMode === "total_base" ? (
                 <Field label="Total base budget (SOL)">
-                  <input className="input" {...form.register("budgetBase")} />
+                  <div className="flex gap-2">
+                    <input className="input" {...form.register("budgetBase")} />
+                    <button type="button" className="btn-outline" onClick={handleCalculate}>
+                      Calculate
+                    </button>
+                  </div>
                 </Field>
               ) : null}
               {!isPerps && budgetMode === "total_usd" ? (
                 <Field label="Total budget (USD)">
-                  <input className="input" {...form.register("budgetTotalUsd")} />
+                  <div className="flex gap-2">
+                    <input className="input" {...form.register("budgetTotalUsd")} />
+                    <button type="button" className="btn-outline" onClick={handleCalculate}>
+                      Calculate
+                    </button>
+                  </div>
                 </Field>
               ) : null}
               {!isPerps && (
