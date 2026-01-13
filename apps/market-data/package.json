@@ -12,12 +12,17 @@
     "lint": "echo 'no lint configured'"
   },
   "dependencies": {
+    "@drift-labs/sdk": "^2.115.0",
+    "@solana/web3.js": "^1.98.4",
     "@zero/core": "workspace:*",
+    "bn.js": "^5.2.1",
+    "dotenv": "^16.4.5",
     "fastify": "^4.28.1",
     "ioredis": "^5.4.1",
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@types/bn.js": "^5.1.2",
     "@types/ws": "^8.5.12",
     "tsx": "^4.16.2"
   }

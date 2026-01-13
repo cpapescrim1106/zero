@@ -11,6 +11,10 @@ interface HeliusProviderOptions {
   httpUrl: string;
   walletPubkey: string;
   commitment: "processed" | "confirmed" | "finalized";
+  subscribeLogs?: boolean;
+  subscribeWallet?: boolean;
+  subscribeTokens?: boolean;
+  tokenMintAllowlist?: string[];
   onEvent: (event: NormalizedEvent) => void;
   onLog?: (message: string, context?: Record<string, unknown>) => void;
 }
@@ -124,9 +128,15 @@ export class HeliusProvider {
   private accountBalances = new Map<string, { mint: string; amount: bigint; decimals: number }>();
   private mintTotals = new Map<string, { amount: bigint; decimals: number }>();
   private tokenAccountSubscriptions = new Set<string>();
+  private tokenMintAllowlist?: Set<string>;
 
   constructor(private options: HeliusProviderOptions) {
     this.client = new RpcWebSocket(options.wsUrl, options.onLog, () => this.scheduleReconnect());
+    if (options.tokenMintAllowlist && options.tokenMintAllowlist.length > 0) {
+      this.tokenMintAllowlist = new Set(
+        options.tokenMintAllowlist.map((mint) => mint.trim()).filter(Boolean)
+      );
+    }
   }
 
   async start() {
@@ -154,9 +164,15 @@ export class HeliusProvider {
     try {
       await this.client.connect();
       this.tokenAccountSubscriptions.clear();
-      await this.subscribeLogs();
-      await this.subscribeWalletAccount();
-      await this.subscribeTokenAccounts();
+      if (this.options.subscribeLogs !== false) {
+        await this.subscribeLogs();
+      }
+      if (this.options.subscribeWallet !== false) {
+        await this.subscribeWalletAccount();
+      }
+      if (this.options.subscribeTokens !== false) {
+        await this.subscribeTokenAccounts();
+      }
       this.options.onLog?.("helius subscriptions established");
     } catch (err) {
       this.options.onLog?.("helius connection failed", { error: (err as Error).message });
@@ -243,6 +259,12 @@ export class HeliusProvider {
           decimals: Number(tokenAmount.decimals ?? 0)
         };
       })
+      .filter((account) => {
+        if (!account) {
+          return false;
+        }
+        return this.isAllowedMint(account.mint);
+      })
       .filter(Boolean) as Array<{ pubkey: string; mint: string; amount: bigint; decimals: number }>;
   }
 
@@ -285,6 +307,9 @@ export class HeliusProvider {
     const info = parsed?.info;
     const tokenAmount = info?.tokenAmount;
     if (!info?.mint || !tokenAmount?.amount) {
+      return;
+    }
+    if (!this.isAllowedMint(info.mint)) {
       return;
     }
     this.recordTokenAccountBalance(
@@ -337,6 +362,13 @@ export class HeliusProvider {
       slot
     };
     this.options.onEvent(event);
+  }
+
+  private isAllowedMint(mint: string) {
+    if (!this.tokenMintAllowlist || this.tokenMintAllowlist.size === 0) {
+      return true;
+    }
+    return this.tokenMintAllowlist.has(mint);
   }
 }
 
