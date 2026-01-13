@@ -1,7 +1,16 @@
+import fs from "fs";
+import path from "path";
+import dotenv from "dotenv";
 import { loadConfig } from "./config";
 import { createDb } from "./db";
 import { RedisBus } from "./redisBus";
 import { buildServer } from "./server";
+
+const defaultEnvPath = path.resolve(process.cwd(), ".env.local");
+const fallbackEnvPath = path.resolve(process.cwd(), "apps/api/.env.local");
+const envPath =
+  process.env.ENV_PATH ?? (fs.existsSync(defaultEnvPath) ? defaultEnvPath : fallbackEnvPath);
+dotenv.config({ path: envPath });
 
 const config = loadConfig();
 const bus = new RedisBus(config.redisUrl);
