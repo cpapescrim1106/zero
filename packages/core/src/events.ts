@@ -2,6 +2,7 @@ export type EventVersion = "v1";
 
 export type EventKind =
   | "price"
+  | "perps_market"
   | "balance"
   | "wallet_tx"
   | "intent"
@@ -11,7 +12,15 @@ export type EventKind =
   | "risk"
   | "health";
 
-export type EventSource = "helius" | "rpc" | "jupiter" | "internal";
+export type EventSource =
+  | "helius"
+  | "rpc"
+  | "jupiter"
+  | "drift"
+  | "internal"
+  | "coingecko"
+  | "kraken"
+  | "manual";
 
 export interface BaseEvent {
   id: string;
@@ -30,6 +39,19 @@ export interface PriceEvent extends BaseEvent {
   bid?: string;
   ask?: string;
   slot?: number;
+}
+
+export interface PerpsMarketEvent extends BaseEvent {
+  kind: "perps_market";
+  market: string;
+  markPrice: string;
+  bid?: string;
+  ask?: string;
+  oraclePrice?: string;
+  fundingRate?: string;
+  nextFundingTime?: string;
+  markOracleDivergenceBps?: number;
+  volatility?: string;
 }
 
 export interface BalanceEvent extends BaseEvent {
@@ -58,6 +80,7 @@ export interface OrderEvent extends BaseEvent {
   price?: string;
   size?: string;
   status: "new" | "open" | "partial" | "filled" | "canceled" | "rejected";
+  error?: string;
 }
 
 export interface FillEvent extends BaseEvent {
@@ -95,8 +118,13 @@ export interface RiskEvent extends BaseEvent {
     | "max_daily_loss"
     | "max_slippage"
     | "stale_market_data"
-    | "manual_pause";
-  action: "reduce_only" | "shrink" | "pause";
+    | "manual_pause"
+    | "liquidation_buffer"
+    | "leverage_cap"
+    | "funding_guardrail"
+    | "mark_oracle_divergence"
+    | "reduce_only_trigger";
+  action: "reduce_only" | "shrink" | "clamp" | "pause";
   context?: Record<string, unknown>;
 }
 
@@ -109,6 +137,7 @@ export interface HealthEvent extends BaseEvent {
 
 export type NormalizedEvent =
   | PriceEvent
+  | PerpsMarketEvent
   | BalanceEvent
   | WalletTxEvent
   | IntentEvent

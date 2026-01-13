@@ -26,6 +26,9 @@ export interface CancelLimitOrderIntent extends BaseIntent {
   kind: "cancel_limit_order";
   orderId: string;
   externalId?: string;
+  side?: "buy" | "sell";
+  price?: string;
+  size?: string;
 }
 
 export interface CancelAllIntent extends BaseIntent {
