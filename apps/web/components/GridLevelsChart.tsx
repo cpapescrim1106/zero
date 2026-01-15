@@ -51,6 +51,17 @@ export default function GridLevelsChart({
     return { min: Math.max(0, min - pad), max: max + pad };
   }, [orders, midPrice, priceSeries]);
 
+  const timeRange = useMemo(() => {
+    const times = priceSeries.map((point) => Number(point.time)).filter((time) => Number.isFinite(time));
+    const now = Math.floor(Date.now() / 1000);
+    if (times.length === 0) {
+      return { start: now - 60, end: now };
+    }
+    const start = Math.min(...times);
+    const end = Math.max(...times);
+    return { start, end: end <= start ? start + 60 : end };
+  }, [priceSeries]);
+
   useEffect(() => {
     if (!containerRef.current) {
       return;
@@ -124,18 +135,29 @@ export default function GridLevelsChart({
       return;
     }
     const data = [
-      { time: 1 as UTCTimestamp, value: priceRange.min },
-      { time: 2 as UTCTimestamp, value: priceRange.max }
+      { time: timeRange.start as UTCTimestamp, value: priceRange.min },
+      { time: timeRange.end as UTCTimestamp, value: priceRange.max }
     ];
     rangeSeriesRef.current.setData(data);
-  }, [priceRange]);
+  }, [priceRange, timeRange]);
 
   useEffect(() => {
     if (!priceSeriesRef.current) {
       return;
     }
-    priceSeriesRef.current.setData(priceSeries);
-  }, [priceSeries]);
+    const data =
+      priceSeries.length === 1
+        ? [
+            priceSeries[0],
+            {
+              time: timeRange.end as UTCTimestamp,
+              value: priceSeries[0].value
+            }
+          ]
+        : priceSeries;
+    priceSeriesRef.current.setData(data);
+    chartRef.current?.timeScale().fitContent();
+  }, [priceSeries, timeRange]);
 
   useEffect(() => {
     if (!rangeSeriesRef.current) {

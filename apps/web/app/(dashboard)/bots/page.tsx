@@ -73,6 +73,8 @@ export default function BotsPage() {
   const orders = ordersData?.orders ?? [];
   const openOrders = orders.filter((order) => ["new", "open", "partial"].includes(order.status));
   const fills = fillsData?.fills ?? [];
+  const filledOrders = orders.filter((order) => order.status === "filled");
+  const placedOrders = orders.filter((order) => order.status !== "rejected");
   const orderLevels = openOrders
     .map((order) => ({
       price: Number(order.price),
@@ -91,6 +93,23 @@ export default function BotsPage() {
   const gridCount = selectedBot ? readGridCount(selectedBot.config) : null;
   const lastPrice = readNumber(botStateData?.state?.lastPrice);
   const lastFill = fills[0];
+  const pnlRealized = readNumber(botStateData?.state?.pnlRealized);
+  const pnlUnrealized = readNumber(botStateData?.state?.pnlUnrealized);
+  const equity = readNumber(botStateData?.state?.equity);
+  const startNav = readNumber(botStateData?.state?.startNav);
+  const startPrice = readNumber(botStateData?.state?.startPrice);
+  const netPnl = computeNetPnl(pnlRealized, pnlUnrealized);
+  const roi = computeRoi(netPnl, startNav);
+  const bhSolNav = computeBenchmarkNav(startNav, startPrice, lastPrice);
+  const alphaSol = computeAlpha(equity, bhSolNav);
+  const totalFees = sumFees(fills);
+  const fillRate = placedOrders.length > 0 ? filledOrders.length / placedOrders.length : null;
+  const gridHealthLabel = formatGridHealth(openOrders.length, gridCount);
+  const inventorySkew = formatInventorySkew(
+    readNumber(botStateData?.state?.inventoryBase),
+    readNumber(botStateData?.state?.inventoryQuote),
+    lastPrice
+  );
   const [priceHistory, setPriceHistory] = useState<Array<{ time: import("lightweight-charts").UTCTimestamp; value: number }>>([]);
   const lastPriceRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number>(0);
@@ -176,6 +195,8 @@ export default function BotsPage() {
                   <th className="px-2 py-1.5 text-left">Status</th>
                   <th className="px-2 py-1.5 text-left">Market</th>
                   <th className="px-2 py-1.5 text-left">Strategy</th>
+                  <th className="px-2 py-1.5 text-right">PnL</th>
+                  <th className="px-2 py-1.5 text-right">Equity</th>
                   <th className="px-2 py-1.5 text-right">Updated</th>
                   <th className="px-2 py-1.5 text-right">Actions</th>
                 </tr>
@@ -183,13 +204,13 @@ export default function BotsPage() {
               <tbody className="divide-y divide-border">
                 {isLoading ? (
                   <tr>
-                    <td colSpan={6} className="px-2 py-3 text-muted">
+                    <td colSpan={8} className="px-2 py-3 text-muted">
                       Loading bots...
                     </td>
                   </tr>
                 ) : bots.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="px-2 py-3 text-muted">
+                    <td colSpan={8} className="px-2 py-3 text-muted">
                       No bots yet.
                     </td>
                   </tr>
@@ -198,6 +219,11 @@ export default function BotsPage() {
                     const status = resolveStatus(bot);
                     const primaryLabel =
                       status.action === "pause" ? "Pause" : status.action === "resume" ? "Resume" : "Start";
+                    const runtimePnl = computeNetPnl(
+                      readNumber(bot.runtime?.pnlRealized),
+                      readNumber(bot.runtime?.pnlUnrealized)
+                    );
+                    const runtimeEquity = readNumber(bot.runtime?.equity);
                     const selected = bot.id === selectedId;
                     return (
                       <tr
@@ -219,27 +245,36 @@ export default function BotsPage() {
                           {bot.strategyKey}
                         </td>
                         <td className="px-2 py-1.5 text-right text-[11px] text-muted">
+                          {formatUsd(runtimePnl)}
+                        </td>
+                        <td className="px-2 py-1.5 text-right text-[11px] text-muted">
+                          {formatUsd(runtimeEquity)}
+                        </td>
+                        <td className="px-2 py-1.5 text-right text-[11px] text-muted">
                           {bot.runtime?.lastEventAt ? formatTimeAgo(bot.runtime.lastEventAt) : "-"}
                         </td>
                         <td className="px-2 py-1.5 text-right">
                           <div className="flex justify-end gap-1">
-                            <ActionButton
+                            <IconActionButton
                               label={primaryLabel}
+                              icon={status.action === "pause" ? "⏸" : status.action === "resume" ? "▶" : "▶"}
                               onClick={(event) => {
                                 event.stopPropagation();
                                 handleAction(bot.id, status.action);
                               }}
                             />
-                            <ActionButton
+                            <IconActionButton
                               label="Stop"
+                              icon="■"
                               tone="danger"
                               onClick={(event) => {
                                 event.stopPropagation();
                                 handleAction(bot.id, "stop");
                               }}
                             />
-                            <ActionButton
-                              label={reduceOnly[bot.id] ? "Reduce*" : "Reduce"}
+                            <IconActionButton
+                              label={reduceOnly[bot.id] ? "Reduce (active)" : "Reduce"}
+                              icon="↓"
                               onClick={(event) => {
                                 event.stopPropagation();
                                 handleAction(bot.id, "reduce");
@@ -247,10 +282,11 @@ export default function BotsPage() {
                             />
                             <Link
                               href={`/bots/${bot.id}/edit`}
-                              className="rounded border border-border bg-white/70 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-text"
+                              title="Edit"
+                              className="flex h-6 w-6 items-center justify-center rounded border border-border bg-white/70 text-[11px] font-semibold text-text"
                               onClick={(event) => event.stopPropagation()}
                             >
-                              Edit
+                              ✎
                             </Link>
                           </div>
                         </td>
@@ -295,16 +331,28 @@ export default function BotsPage() {
                 <div>
                   <p className="text-[10px] uppercase tracking-[0.2em] text-muted">Focus</p>
                   <h3 className="text-base font-semibold text-text">{selectedBot.name}</h3>
-                  <p className="text-[11px] text-muted">{selectedBot.market}</p>
+                  <p className="text-[11px] text-muted">
+                    {selectedBot.market} • {selectedBot.venue} • {selectedBot.strategyKey}
+                  </p>
                 </div>
                 <StatusPill tone={resolveStatus(selectedBot).tone} label={resolveStatus(selectedBot).label} />
               </div>
 
-              <div className="grid grid-cols-2 gap-2">
-                <KeyValue label="Venue" value={selectedBot.venue} />
-                <KeyValue label="Strategy" value={selectedBot.strategyKey} />
-                <KeyValue label="Open orders / grid" value={formatGridCount(openOrders.length, gridCount)} />
-                <KeyValue label="Fills" value={fills.length} />
+              <div className="grid grid-cols-3 gap-2">
+                <MetricTile label="Bot NAV" value={formatUsd(equity)} />
+                <MetricTile label="P&L" value={formatUsd(netPnl)} />
+                <MetricTile label="ROI" value={formatPercent(roi)} />
+                <MetricTile label="Alpha vs SOL" value={formatUsd(alphaSol)} />
+                <MetricTile label="Grid Profit" value={formatUsd(pnlRealized)} />
+                <MetricTile label="Floating P&L" value={formatUsd(pnlUnrealized)} />
+              </div>
+
+              <div className="text-[10px] text-muted">
+                <span className="uppercase tracking-[0.2em]">Grid health</span>
+                <span className="ml-2">{gridHealthLabel}</span>
+                {inventorySkew ? <span className="ml-2">• Skew {inventorySkew}</span> : null}
+                {fillRate !== null ? <span className="ml-2">• Fill {formatPercent(fillRate)}</span> : null}
+                {totalFees !== null ? <span className="ml-2">• Fees {formatUsd(totalFees)}</span> : null}
               </div>
 
               <div>
@@ -357,12 +405,14 @@ function StatusPill({ label, tone }: { label: string; tone: BotStatusTone }) {
   );
 }
 
-function ActionButton({
+function IconActionButton({
   label,
+  icon,
   tone = "default",
   onClick
 }: {
   label: string;
+  icon: string;
   tone?: "default" | "danger";
   onClick?: (event: React.MouseEvent<HTMLButtonElement>) => void;
 }) {
@@ -373,10 +423,12 @@ function ActionButton({
   return (
     <button
       type="button"
+      title={label}
+      aria-label={label}
       onClick={onClick}
-      className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] ${className}`}
+      className={`flex h-6 w-6 items-center justify-center rounded border text-[11px] font-semibold ${className}`}
     >
-      {label}
+      {icon}
     </button>
   );
 }
@@ -390,6 +442,15 @@ function KeyValue({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
+function MetricTile({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="flex flex-col gap-0.5 rounded border border-border bg-white/70 px-2 py-1">
+      <span className="text-[10px] uppercase tracking-[0.2em] text-muted">{label}</span>
+      <span className="text-xs font-semibold text-text">{value}</span>
+    </div>
+  );
+}
+
 function OrdersSplitTable({ orders }: { orders: ApiOrder[] }) {
   if (orders.length === 0) {
     return <p className="text-[11px] text-muted">No orders.</p>;
@@ -399,7 +460,7 @@ function OrdersSplitTable({ orders }: { orders: ApiOrder[] }) {
     .sort((a, b) => Number(b.price) - Number(a.price));
   const sells = orders
     .filter((order) => order.side === "sell")
-    .sort((a, b) => Number(b.price) - Number(a.price));
+    .sort((a, b) => Number(a.price) - Number(b.price));
   const maxRows = Math.max(buys.length, sells.length);
   return (
     <div className="overflow-hidden rounded border border-border bg-white/70">
@@ -558,6 +619,82 @@ function formatGridCount(openOrders: number, gridCount: number | null) {
     return `${openOrders} / —`;
   }
   return `${openOrders} / ${gridCount}`;
+}
+
+function computeNetPnl(realized: number | null, unrealized: number | null) {
+  if (realized === null && unrealized === null) {
+    return null;
+  }
+  return (realized ?? 0) + (unrealized ?? 0);
+}
+
+function computeRoi(netPnl: number | null, startNav: number | null) {
+  if (netPnl === null || startNav === null) {
+    return null;
+  }
+  if (!Number.isFinite(startNav) || startNav <= 0) {
+    return null;
+  }
+  return netPnl / startNav;
+}
+
+function sumFees(fills: ApiFill[]) {
+  const total = fills.reduce((sum, fill) => {
+    const fee = readNumber(fill.fees);
+    return fee === null ? sum : sum + fee;
+  }, 0);
+  return Number.isFinite(total) && total > 0 ? total : null;
+}
+
+function formatUsd(value: number | null) {
+  if (value === null || !Number.isFinite(value)) {
+    return "—";
+  }
+  const sign = value < 0 ? "-" : "";
+  return `${sign}$${Math.abs(value).toFixed(2)}`;
+}
+
+function formatPercent(value: number | null) {
+  if (value === null || !Number.isFinite(value)) {
+    return "—";
+  }
+  return `${(value * 100).toFixed(2)}%`;
+}
+
+function formatGridHealth(openOrders: number, gridCount: number | null) {
+  const openLabel = gridCount === null ? `${openOrders}` : `${openOrders}/${gridCount}`;
+  return `${openLabel} active`;
+}
+
+function formatInventorySkew(base: number | null, quote: number | null, lastPrice: number | null) {
+  if (base === null || quote === null || lastPrice === null) {
+    return null;
+  }
+  const baseValue = base * lastPrice;
+  const total = baseValue + quote;
+  if (!Number.isFinite(total) || total <= 0) {
+    return null;
+  }
+  const basePct = Math.round((baseValue / total) * 100);
+  const quotePct = Math.max(0, 100 - basePct);
+  return `${basePct}/${quotePct}`;
+}
+
+function computeBenchmarkNav(startNav: number | null, startPrice: number | null, lastPrice: number | null) {
+  if (startNav === null || startPrice === null || lastPrice === null) {
+    return null;
+  }
+  if (!Number.isFinite(startNav) || !Number.isFinite(startPrice) || !Number.isFinite(lastPrice) || startPrice <= 0) {
+    return null;
+  }
+  return startNav * (lastPrice / startPrice);
+}
+
+function computeAlpha(nav: number | null, benchmarkNav: number | null) {
+  if (nav === null || benchmarkNav === null) {
+    return null;
+  }
+  return nav - benchmarkNav;
 }
 
 function mergePriceSeries(
