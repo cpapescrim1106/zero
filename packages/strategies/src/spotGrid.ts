@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 import type { Intent } from "@zero/core";
-import type { Strategy, StrategyContext } from "./types";
+import type { Strategy, StrategyContext, StrategyOrder } from "./types";
 
 export class SpotGridStaticStrategy implements Strategy {
   key = "spot_grid_static";
@@ -10,7 +10,18 @@ export class SpotGridStaticStrategy implements Strategy {
     if (!botConfig.grid || !market.lastPrice) {
       return [];
     }
-    return buildGridIntents(botState.botId, botConfig.market, market.lastPrice, botConfig.grid, openOrders);
+    const lower = Number(botConfig.grid.lowerPrice);
+    const upper = Number(botConfig.grid.upperPrice);
+    const mid = Number.isFinite(lower) && Number.isFinite(upper) ? ((lower + upper) / 2).toFixed(6) : undefined;
+    return buildGridIntents(
+      botState.botId,
+      botConfig.market,
+      market.lastPrice,
+      botConfig.grid,
+      openOrders,
+      mid,
+      botState.gridGapIndex ?? null
+    );
   }
 }
 
@@ -22,7 +33,15 @@ export class SpotGridDynamicStrategy implements Strategy {
     if (!botConfig.grid || !market.lastPrice) {
       return [];
     }
-    return buildGridIntents(botState.botId, botConfig.market, market.lastPrice, botConfig.grid, openOrders);
+    return buildGridIntents(
+      botState.botId,
+      botConfig.market,
+      market.lastPrice,
+      botConfig.grid,
+      openOrders,
+      undefined,
+      botState.gridGapIndex ?? null
+    );
   }
 }
 
@@ -39,12 +58,14 @@ function buildGridIntents(
     maxQuoteBudget?: string;
     maxBaseBudget?: string;
   },
-  openOrders: Array<{ side: "buy" | "sell"; price: string; size: string }>
+  openOrders: StrategyOrder[],
+  midOverride?: string,
+  gapIndexOverride?: number | null
 ): Intent[] {
   const lower = Number(grid.lowerPrice);
   const upper = Number(grid.upperPrice);
   const count = Math.max(1, Math.floor(grid.gridCount));
-  const mid = Number(lastPrice);
+  const mid = Number(midOverride ?? lastPrice);
   if (!Number.isFinite(lower) || !Number.isFinite(upper) || !Number.isFinite(mid) || upper <= lower) {
     return [];
   }
@@ -54,6 +75,8 @@ function buildGridIntents(
     return [];
   }
   const existing = openOrders.map((order) => ({
+    id: order.id,
+    externalId: order.externalId,
     side: order.side,
     price: Number(order.price),
     size: Number(order.size)
@@ -102,8 +125,67 @@ function buildGridIntents(
   }
 
   const intents: Intent[] = [];
-  for (const order of [...allowedBuys, ...allowedSells]) {
-    if (hasOrder(existing, order.side, order.price, orderSize)) {
+  const priceEpsilon = Math.max(step * 0.001, 1e-6);
+  const levelOrders = new Map<number, StrategyOrder[]>();
+  for (const order of openOrders) {
+    const price = Number(order.price);
+    if (!Number.isFinite(price)) {
+      continue;
+    }
+    const index = Math.round((price - lower) / step);
+    if (!Number.isFinite(index)) {
+      continue;
+    }
+    if (!levelOrders.has(index)) {
+      levelOrders.set(index, []);
+    }
+    levelOrders.get(index)!.push(order);
+  }
+
+  const gridPrices = Array.from({ length: count }, (_, idx) => lower + step * idx);
+  const gapIndex =
+    typeof gapIndexOverride === "number" && Number.isFinite(gapIndexOverride)
+      ? Math.min(count - 1, Math.max(0, Math.round(gapIndexOverride)))
+      : null;
+  for (let i = 0; i < gridPrices.length; i += 1) {
+    const price = gridPrices[i];
+    if (price === undefined || !Number.isFinite(price)) {
+      continue;
+    }
+    const desiredSide: "buy" | "sell" | "none" =
+      gapIndex !== null
+        ? i < gapIndex
+          ? "buy"
+          : i > gapIndex
+            ? "sell"
+            : "none"
+        : price < mid
+          ? "buy"
+          : "sell";
+    const existingAtLevel = levelOrders.get(i) ?? [];
+    for (const order of existingAtLevel) {
+      if (desiredSide === "none" || order.side !== desiredSide) {
+        intents.push({
+          id: randomUUID(),
+          botId,
+          kind: "cancel_limit_order",
+          createdAt: new Date().toISOString(),
+          orderId: order.id,
+          externalId: order.externalId,
+          side: order.side,
+          price: order.price,
+          size: order.size,
+          reason: "grid_gap"
+        });
+      }
+    }
+    if (desiredSide === "none") {
+      continue;
+    }
+    if (existingAtLevel.some((order) => order.side === desiredSide)) {
+      continue;
+    }
+    if (existing.some((entry) => Math.abs(entry.price - price) < priceEpsilon)) {
       continue;
     }
     intents.push({
@@ -112,8 +194,8 @@ function buildGridIntents(
       kind: "place_limit_order",
       createdAt: new Date().toISOString(),
       symbol: market,
-      side: order.side,
-      price: order.price.toFixed(6),
+      side: desiredSide,
+      price: price.toFixed(6),
       size: orderSize.toFixed(6)
     });
   }

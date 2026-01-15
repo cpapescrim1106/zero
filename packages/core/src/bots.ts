@@ -148,6 +148,7 @@ export interface BotState {
   startPrice?: string;
   startBase?: string;
   startQuote?: string;
+  gridGapIndex?: number;
   inventoryBase?: string;
   inventoryQuote?: string;
   inventoryCostQuote?: string;

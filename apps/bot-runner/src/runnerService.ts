@@ -660,6 +660,7 @@ export class BotRunnerService {
       });
       for (const fill of sorted) {
         this.applySpotFillToStateValues(botId, fill.side, fill.price, fill.size);
+        this.applyGridGapFromFill(botId, fill.price);
       }
     }
 
@@ -721,6 +722,7 @@ export class BotRunnerService {
     const startNav = safeQuote + safeBase * price;
     const equity = startNav;
     const inventoryCostQuote = safeBase * price;
+    const gapIndex = grid ? resolveGridGapIndex(grid, price) : null;
     const next = this.bots.updatePerformance(botId, {
       startPrice: price.toFixed(6),
       startBase: safeBase.toFixed(6),
@@ -731,13 +733,15 @@ export class BotRunnerService {
       inventoryCostQuote: inventoryCostQuote.toFixed(6),
       equity: Number.isFinite(equity) ? equity.toFixed(6) : undefined,
       pnlRealized: "0",
-      pnlUnrealized: "0"
+      pnlUnrealized: "0",
+      gridGapIndex: gapIndex ?? undefined
     });
     void this.bus.setCache(CACHE_KEYS.bot(botId), next);
   }
 
   private applySpotFillToState(botId: string, fill: FillEvent) {
     this.applySpotFillToStateValues(botId, fill.side, fill.price, fill.qty);
+    this.applyGridGapFromFill(botId, fill.price);
   }
 
   private applySpotFillToStateValues(botId: string, side: "buy" | "sell", priceRaw: string, qtyRaw: string) {
@@ -799,6 +803,24 @@ export class BotRunnerService {
       pnlUnrealized: unrealized !== null ? unrealized.toFixed(6) : state.pnlUnrealized,
       equity: equity !== null ? equity.toFixed(6) : state.equity
     });
+    void this.bus.setCache(CACHE_KEYS.bot(botId), next);
+  }
+
+  private applyGridGapFromFill(botId: string, priceRaw: string) {
+    const state = this.bots.getState(botId);
+    const config = this.bots.getConfig(botId);
+    if (!state || !config?.grid) {
+      return;
+    }
+    const price = Number(priceRaw);
+    if (!Number.isFinite(price)) {
+      return;
+    }
+    const gapIndex = resolveGridGapIndex(config.grid, price);
+    if (gapIndex === null || gapIndex === state.gridGapIndex) {
+      return;
+    }
+    const next = this.bots.updatePerformance(botId, { gridGapIndex: gapIndex });
     void this.bus.setCache(CACHE_KEYS.bot(botId), next);
   }
 
@@ -1091,6 +1113,27 @@ function resolveUsdPrice(symbol: string | null, market: MarketStateStore) {
   }
   const parsed = Number(marketState.lastPrice);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function resolveGridGapIndex(
+  grid: { lowerPrice: string; upperPrice: string; gridCount: number },
+  price: number
+) {
+  const lower = Number(grid.lowerPrice);
+  const upper = Number(grid.upperPrice);
+  const count = Math.max(1, Math.floor(grid.gridCount));
+  if (!Number.isFinite(lower) || !Number.isFinite(upper) || upper <= lower || !Number.isFinite(price)) {
+    return null;
+  }
+  if (count === 1) {
+    return 0;
+  }
+  const step = (upper - lower) / (count - 1);
+  if (!Number.isFinite(step) || step <= 0) {
+    return null;
+  }
+  const rawIndex = Math.round((price - lower) / step);
+  return Math.min(count - 1, Math.max(0, rawIndex));
 }
 
 const TOKEN_MINTS = {
