@@ -22,6 +22,8 @@ type Action = (typeof ACTIONS)[number] | "reduce";
 
 type BotStatusTone = "running" | "paused" | "stopped" | "error";
 
+const MAX_PRICE_POINTS = 720;
+
 export default function BotsPage() {
   const queryClient = useQueryClient();
   const { data, isLoading } = useQuery({
@@ -102,6 +104,7 @@ export default function BotsPage() {
   const roi = computeRoi(netPnl, startNav);
   const bhSolNav = computeBenchmarkNav(startNav, startPrice, lastPrice);
   const alphaSol = computeAlpha(equity, bhSolNav);
+  const alphaSolPct = computeAlphaPct(equity, bhSolNav);
   const totalFees = sumFees(fills);
   const fillRate = placedOrders.length > 0 ? filledOrders.length / placedOrders.length : null;
   const gridHealthLabel = formatGridHealth(openOrders.length, gridCount);
@@ -111,6 +114,7 @@ export default function BotsPage() {
     lastPrice
   );
   const [rangeSeconds, setRangeSeconds] = useState<number | null>(300);
+  const [yRangeMode, setYRangeMode] = useState<"action" | "full">("action");
   const [priceHistory, setPriceHistory] = useState<Array<{ time: import("lightweight-charts").UTCTimestamp; value: number }>>([]);
   const lastPriceRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number>(0);
@@ -124,7 +128,7 @@ export default function BotsPage() {
       }))
       .filter((point) => Number.isFinite(point.value) && Number.isFinite(point.time))
       .sort((a, b) => Number(a.time) - Number(b.time))
-      .slice(-120);
+      .slice(-MAX_PRICE_POINTS);
   }, [fills]);
 
   useEffect(() => {
@@ -144,21 +148,43 @@ export default function BotsPage() {
     if (!selectedId || lastPrice === null) {
       return;
     }
+    const prevValue = lastPriceRef.current;
+    lastPriceRef.current = lastPrice;
     if (pythActiveRef.current) {
       return;
     }
-    if (lastPriceRef.current !== null && lastPriceRef.current === lastPrice) {
+    if (prevValue !== null && prevValue === lastPrice) {
       return;
     }
-    lastPriceRef.current = lastPrice;
     setPriceHistory((prev) => {
       const now = Math.floor(Date.now() / 1000);
       const nextTime = now <= lastTimeRef.current ? lastTimeRef.current + 1 : now;
       lastTimeRef.current = nextTime;
       const time = nextTime as import("lightweight-charts").UTCTimestamp;
       const next = [...prev, { time, value: lastPrice }];
-      return next.slice(-120);
+      return next.slice(-MAX_PRICE_POINTS);
     });
+  }, [lastPrice, selectedId]);
+
+  useEffect(() => {
+    if (!selectedId) {
+      return;
+    }
+    const id = setInterval(() => {
+      const value = lastPriceRef.current ?? lastPrice;
+      if (value === null || !Number.isFinite(value)) {
+        return;
+      }
+      setPriceHistory((prev) => {
+        const now = Math.floor(Date.now() / 1000);
+        const nextTime = now <= lastTimeRef.current ? lastTimeRef.current + 1 : now;
+        lastTimeRef.current = nextTime;
+        const time = nextTime as import("lightweight-charts").UTCTimestamp;
+        const next = [...prev, { time, value }];
+        return next.slice(-MAX_PRICE_POINTS);
+      });
+    }, 5000);
+    return () => clearInterval(id);
   }, [lastPrice, selectedId]);
 
   useEffect(() => {
@@ -221,6 +247,8 @@ export default function BotsPage() {
           }
           lastPublishTime = publishTime;
           lastPriceValue = numericPrice;
+          lastPriceRef.current = numericPrice;
+          lastTimeRef.current = Math.max(lastTimeRef.current, Number(publishTime));
           pythActiveRef.current = true;
           const time = Number(publishTime) as import("lightweight-charts").UTCTimestamp;
           setPriceHistory((prev) => mergePriceSeries([{ time, value: numericPrice }], prev));
@@ -236,6 +264,19 @@ export default function BotsPage() {
       }
     };
   }, [selectedBot]);
+
+  const chartSeries = useMemo(() => {
+    if (!rangeSeconds || priceHistory.length === 0) {
+      return priceHistory;
+    }
+    const end = Number(priceHistory[priceHistory.length - 1]?.time ?? 0);
+    if (!Number.isFinite(end) || end === 0) {
+      return priceHistory;
+    }
+    const start = end - rangeSeconds;
+    return priceHistory.filter((point) => Number(point.time) >= start);
+  }, [priceHistory, rangeSeconds]);
+
   const lastEventMessage = lastFill
     ? `${selectedBot?.name ?? ""} ${lastFill.order?.side ?? "fill"} ${formatQty(Number(lastFill.qty))} @ ${formatPrice(Number(lastFill.price))}`
     : selectedBot?.runtime?.message ?? "Idle";
@@ -384,10 +425,8 @@ export default function BotsPage() {
           <div className="mb-1 flex items-center justify-between">
             <p className="text-[10px] uppercase tracking-[0.2em] text-muted">Grid levels</p>
             <div className="flex items-center gap-1 text-[10px] text-muted">
-              <ChartRangeButton label="1m" active={rangeSeconds === 60} onClick={() => setRangeSeconds(60)} />
-              <ChartRangeButton label="5m" active={rangeSeconds === 300} onClick={() => setRangeSeconds(300)} />
-              <ChartRangeButton label="15m" active={rangeSeconds === 900} onClick={() => setRangeSeconds(900)} />
-              <ChartRangeButton label="All" active={rangeSeconds === null} onClick={() => setRangeSeconds(null)} />
+              <ChartRangeButton label="Action" active={yRangeMode === "action"} onClick={() => setYRangeMode("action")} />
+              <ChartRangeButton label="Full" active={yRangeMode === "full"} onClick={() => setYRangeMode("full")} />
             </div>
           </div>
           {selectedBot ? (
@@ -395,9 +434,10 @@ export default function BotsPage() {
               <GridLevelsChart
                 orders={orderLevels}
                 midPrice={lastPrice ?? orderLevels[Math.floor(orderLevels.length / 2)]?.price}
-                priceSeries={priceHistory}
+                priceSeries={chartSeries}
                 height={620}
                 rangeSeconds={rangeSeconds}
+                yRangeMode={yRangeMode}
                 showTimeScale
                 rightOffset={6}
                 barSpacing={7}
@@ -410,6 +450,12 @@ export default function BotsPage() {
           ) : (
             <div className="text-sm text-muted">No bot selected.</div>
           )}
+          <div className="mt-2 flex justify-end gap-1 text-[10px] text-muted">
+            <ChartRangeButton label="1m" active={rangeSeconds === 60} onClick={() => setRangeSeconds(60)} />
+            <ChartRangeButton label="5m" active={rangeSeconds === 300} onClick={() => setRangeSeconds(300)} />
+            <ChartRangeButton label="15m" active={rangeSeconds === 900} onClick={() => setRangeSeconds(900)} />
+            <ChartRangeButton label="All" active={rangeSeconds === null} onClick={() => setRangeSeconds(null)} />
+          </div>
           {lastFill ? (
             <div className="mt-2 text-[11px] text-muted">
               Last fill {lastFill.order?.side ?? "fill"} @ {formatPrice(Number(lastFill.price))}
@@ -435,7 +481,15 @@ export default function BotsPage() {
                 <MetricTile label="Bot NAV" value={formatUsd(equity)} />
                 <MetricTile label="P&L" value={formatUsd(netPnl)} />
                 <MetricTile label="ROI" value={formatPercent(roi)} />
-                <MetricTile label="Alpha vs SOL" value={formatUsd(alphaSol)} />
+                <MetricTile
+                  label="Alpha vs SOL"
+                  value={
+                    <div className="flex items-center justify-between gap-2">
+                      <span>{formatUsd(alphaSol)}</span>
+                      <span className="text-[10px] text-muted">{formatPercent(alphaSolPct)}</span>
+                    </div>
+                  }
+                />
                 <MetricTile label="Grid Profit" value={formatUsd(pnlRealized)} />
                 <MetricTile label="Floating P&L" value={formatUsd(pnlUnrealized)} />
               </div>
@@ -820,6 +874,13 @@ function computeAlpha(nav: number | null, benchmarkNav: number | null) {
   return nav - benchmarkNav;
 }
 
+function computeAlphaPct(nav: number | null, benchmarkNav: number | null) {
+  if (nav === null || benchmarkNav === null || benchmarkNav === 0) {
+    return null;
+  }
+  return (nav - benchmarkNav) / benchmarkNav;
+}
+
 function mergePriceSeries(
   seed: Array<{ time: import("lightweight-charts").UTCTimestamp; value: number }>,
   live: Array<{ time: import("lightweight-charts").UTCTimestamp; value: number }>
@@ -830,5 +891,5 @@ function mergePriceSeries(
   const merged = Array.from(map.entries())
     .map(([time, value]) => ({ time: time as import("lightweight-charts").UTCTimestamp, value }))
     .sort((a, b) => Number(a.time) - Number(b.time));
-  return merged.slice(-120);
+  return merged.slice(-MAX_PRICE_POINTS);
 }

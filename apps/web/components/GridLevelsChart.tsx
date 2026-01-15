@@ -16,6 +16,7 @@ export interface GridLevelsChartProps {
   compact?: boolean;
   priceSeries?: Array<{ time: UTCTimestamp; value: number }>;
   rangeSeconds?: number | null;
+  yRangeMode?: "action" | "full";
   showTimeScale?: boolean;
   rightOffset?: number;
   barSpacing?: number;
@@ -29,6 +30,7 @@ export default function GridLevelsChart({
   compact = false,
   priceSeries = [],
   rangeSeconds = null,
+  yRangeMode = "action",
   showTimeScale = false,
   rightOffset = 4,
   barSpacing = 8,
@@ -42,22 +44,31 @@ export default function GridLevelsChart({
 
   const priceRange = useMemo(() => {
     const orderPrices = orders.map((order) => order.price).filter((price) => Number.isFinite(price));
-    const seriesPrices = priceSeries.map((point) => point.value).filter((price) => Number.isFinite(price));
     const mid = Number.isFinite(midPrice as number) ? (midPrice as number) : null;
-    const combined = mid !== null ? [...orderPrices, ...seriesPrices, mid] : [...orderPrices, ...seriesPrices];
-    if (combined.length === 0) {
-      return { min: 0.8, max: 1.2 };
+    if (orderPrices.length === 0) {
+      const fallback = mid ?? priceSeries[priceSeries.length - 1]?.value ?? 1;
+      const pad = fallback * 0.01;
+      return { min: Math.max(0, fallback - pad), max: fallback + pad };
     }
-    const min = Math.min(...combined);
-    const max = Math.max(...combined);
-    if (mid !== null) {
-      const spread = Math.max(mid - min, max - mid, mid * 0.002);
-      const pad = spread * 1.2;
-      return { min: Math.max(0, mid - pad), max: mid + pad };
+
+    const sorted = [...orderPrices].sort((a, b) => a - b);
+    const minGrid = sorted[0];
+    const maxGrid = sorted[sorted.length - 1];
+    if (yRangeMode === "full" || !mid) {
+      const pad = (maxGrid - minGrid) * 0.04 || minGrid * 0.01;
+      return { min: Math.max(0, minGrid - pad), max: maxGrid + pad };
     }
-    const pad = (max - min) * 0.08 || min * 0.02;
-    return { min: Math.max(0, min - pad), max: max + pad };
-  }, [orders, midPrice, priceSeries]);
+
+    const below = sorted.filter((price) => price < mid);
+    const above = sorted.filter((price) => price > mid);
+    const belowLines = below.slice(-2);
+    const aboveLines = above.slice(0, 2);
+    const floor = belowLines.length ? belowLines[0] : minGrid;
+    const ceiling = aboveLines.length ? aboveLines[aboveLines.length - 1] : maxGrid;
+
+    const rangeHalf = Math.max(mid - floor, ceiling - mid, mid * 0.001);
+    return { min: Math.max(0, mid - rangeHalf), max: mid + rangeHalf };
+  }, [orders, midPrice, priceSeries, yRangeMode]);
 
   const timeRange = useMemo(() => {
     const times = priceSeries.map((point) => Number(point.time)).filter((time) => Number.isFinite(time));
