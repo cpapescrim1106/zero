@@ -62,6 +62,7 @@ function buildGridIntents(
   const baseBudget = Number(grid.maxBaseBudget);
   const hasQuoteBudget = Number.isFinite(quoteBudget) && quoteBudget > 0;
   const hasBaseBudget = Number.isFinite(baseBudget) && baseBudget > 0;
+  const budgetEpsilon = 1e-9;
 
   const candidates: Array<{ side: "buy" | "sell"; price: number }> = [];
   for (let i = 0; i < count; i += 1) {
@@ -82,7 +83,7 @@ function buildGridIntents(
   let quoteUsed = 0;
   for (const order of buys) {
     const notional = order.price * orderSize;
-    if (hasQuoteBudget && quoteUsed + notional > quoteBudget) {
+    if (hasQuoteBudget && quoteUsed + notional - quoteBudget > budgetEpsilon) {
       break;
     }
     quoteUsed += notional;
@@ -93,7 +94,7 @@ function buildGridIntents(
   let baseUsed = 0;
   for (const order of sells) {
     const newUsed = baseUsed + orderSize;
-    if (hasBaseBudget && newUsed > baseBudget) {
+    if (hasBaseBudget && newUsed - baseBudget > budgetEpsilon) {
       break;
     }
     baseUsed = newUsed;

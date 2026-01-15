@@ -8,10 +8,10 @@ export default function MetricCard({
   hint?: string;
 }) {
   return (
-    <div className="rounded-xl border border-border bg-panel/90 p-4 shadow-card">
-      <p className="text-xs uppercase tracking-[0.25em] text-muted">{label}</p>
-      <p className="mt-3 text-2xl font-semibold text-text">{value}</p>
-      {hint ? <p className="mt-2 text-xs text-muted">{hint}</p> : null}
+    <div className="rounded-xl border border-border bg-panel/90 p-3 shadow-card">
+      <p className="text-[10px] uppercase tracking-[0.2em] text-muted">{label}</p>
+      <p className="mt-2 text-xl font-semibold text-text">{value}</p>
+      {hint ? <p className="mt-1 text-[11px] text-muted">{hint}</p> : null}
     </div>
   );
 }

@@ -225,6 +225,15 @@ export class Persistence {
     });
   }
 
+  async findOrderByExternalId(externalId: string) {
+    if (!this.prisma) {
+      return null;
+    }
+    return this.prisma.order.findFirst({
+      where: { externalId }
+    });
+  }
+
   async listOpenOrdersForMarket(market: string) {
     if (!this.prisma) {
       return [];

@@ -150,6 +150,25 @@ export class HeliusProvider {
     await this.client.close();
   }
 
+  async refreshBalances() {
+    const [lamports, accounts] = await Promise.all([
+      this.fetchWalletBalance(),
+      this.fetchTokenAccounts()
+    ]);
+
+    this.resetBalances();
+    this.recordTokenAccountBalance(
+      this.options.walletPubkey,
+      SOL_MINT,
+      BigInt(lamports),
+      SOL_DECIMALS
+    );
+
+    for (const account of accounts) {
+      this.recordTokenAccountBalance(account.pubkey, account.mint, account.amount, account.decimals);
+    }
+  }
+
   private scheduleReconnect() {
     if (this.reconnectTimer) {
       return;
@@ -268,6 +287,30 @@ export class HeliusProvider {
       .filter(Boolean) as Array<{ pubkey: string; mint: string; amount: bigint; decimals: number }>;
   }
 
+  private async fetchWalletBalance() {
+    const body = {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "getBalance",
+      params: [this.options.walletPubkey]
+    };
+    const response = await fetch(this.options.httpUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    if (!response.ok) {
+      throw new Error("Failed to fetch wallet balance");
+    }
+    const payload = (await response.json()) as { result?: { value?: number } };
+    return payload?.result?.value ?? 0;
+  }
+
+  private resetBalances() {
+    this.accountBalances.clear();
+    this.mintTotals.clear();
+  }
+
   private handleLogNotification(payload: any, slot?: number) {
     const signature = payload?.signature;
     if (!signature) {
@@ -365,6 +408,9 @@ export class HeliusProvider {
   }
 
   private isAllowedMint(mint: string) {
+    if (mint === SOL_MINT) {
+      return true;
+    }
     if (!this.tokenMintAllowlist || this.tokenMintAllowlist.size === 0) {
       return true;
     }

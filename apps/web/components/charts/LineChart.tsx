@@ -15,7 +15,7 @@ export interface LineChartProps {
   priceLines?: Array<{ price: number; color?: string; title?: string }>;
 }
 
-export default function LineChart({ data, height = 220, color = "#0f172a", priceLines = [] }: LineChartProps) {
+export default function LineChart({ data, height = 160, color = "#0f172a", priceLines = [] }: LineChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<ReturnType<typeof createChart> | null>(null);
   const seriesRef = useRef<ISeriesApi<"Line"> | null>(null);

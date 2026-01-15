@@ -15,6 +15,7 @@ export class MarketDataService {
   private perpsPoller?: DriftPerpsPoller;
   private lastEventAt = Date.now();
   private heartbeatTimer?: NodeJS.Timeout;
+  private balancePoller?: NodeJS.Timeout;
 
   constructor(private config: MarketDataConfig) {
     this.publisher = new RedisPublisher(config.redisUrl);
@@ -63,12 +64,28 @@ export class MarketDataService {
   async start() {
     if (this.helius) {
       await this.helius.start();
+      await this.helius.refreshBalances().catch((err) => {
+        console.warn("[market-data] helius balance refresh failed", { error: (err as Error).message });
+      });
+      if (this.config.balancePollIntervalMs > 0) {
+        this.balancePoller = setInterval(() => {
+          void this.helius?.refreshBalances().catch((err) => {
+            console.warn("[market-data] helius balance refresh failed", { error: (err as Error).message });
+          });
+        }, this.config.balancePollIntervalMs);
+      }
     }
     this.pricePoller.start();
     if (this.perpsRegistry && this.perpsPoller) {
-      await this.perpsRegistry.start();
-      this.perpsPoller.setMarkets(this.perpsRegistry.getMarkets());
-      await this.perpsPoller.start();
+      try {
+        await this.perpsRegistry.start();
+        this.perpsPoller.setMarkets(this.perpsRegistry.getMarkets());
+        await this.perpsPoller.start();
+      } catch (err) {
+        console.warn("[market-data] perps poller failed; continuing with spot prices", {
+          error: (err as Error).message
+        });
+      }
     }
     this.heartbeatTimer = setInterval(() => {
       void this.checkHealth();
@@ -79,6 +96,9 @@ export class MarketDataService {
   async stop() {
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
+    }
+    if (this.balancePoller) {
+      clearInterval(this.balancePoller);
     }
     this.pricePoller.stop();
     if (this.perpsPoller) {

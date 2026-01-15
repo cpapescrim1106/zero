@@ -56,6 +56,15 @@ type TriggerOrder = {
   rawRemainingTakingAmount?: string;
   orderStatus?: string;
   status?: string;
+  closeTx?: string;
+  trades?: Array<{
+    txId?: string;
+    inputAmount?: string;
+    outputAmount?: string;
+    rawInputAmount?: string;
+    rawOutputAmount?: string;
+    action?: string;
+  }>;
 };
 
 const TEN = new BN(10);
@@ -281,6 +290,37 @@ export class JupiterLimitOrderConnector implements ExecutionConnector {
     return { ok: true, message: `openOrders=${orders.length}` };
   }
 
+  async getRecentFills(market: string): Promise<Array<{ orderId: string; side: "buy" | "sell"; price: string; size: string; txSig?: string }>> {
+    const baseQuote = safeParseSymbol(market);
+    let orders: TriggerOrder[] = [];
+    if (baseQuote) {
+      const baseToken = getToken(this.tokens, baseQuote.base);
+      const quoteToken = getToken(this.tokens, baseQuote.quote);
+      const forward = await this.fetchTriggerOrders("history", baseToken.mint, quoteToken.mint);
+      const reverse = await this.fetchTriggerOrders("history", quoteToken.mint, baseToken.mint);
+      const merged = new Map<string, TriggerOrder>();
+      for (const order of [...forward, ...reverse]) {
+        const orderId = extractOrderId(order);
+        if (orderId) {
+          merged.set(orderId, order);
+        }
+      }
+      orders = Array.from(merged.values());
+    } else {
+      orders = await this.fetchTriggerOrders("history");
+    }
+    const filtered = baseQuote
+      ? orders.filter((order) =>
+          matchMarket(order, baseQuote, this.tokensByMint, this.quoteSymbols)
+        )
+      : orders;
+    return filtered
+      .map((order) => toFilledOrder(order, this.tokensByMint, this.quoteSymbols))
+      .filter((order): order is { orderId: string; side: "buy" | "sell"; price: string; size: string; txSig?: string } =>
+        Boolean(order)
+      );
+  }
+
   private async fetchOrderById(orderId: string): Promise<TriggerOrder | null> {
     const orders = await this.fetchTriggerOrders("active");
     return orders.find((order) => extractOrderId(order) === orderId) ?? null;
@@ -419,10 +459,12 @@ export class JupiterLimitOrderConnector implements ExecutionConnector {
     let lastError: Error | undefined;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {
-        const signature = await this.connection.sendRawTransaction(raw, {
-          skipPreflight: false
-        });
-        await this.connection.confirmTransaction(signature, "confirmed");
+        const signature = await this.rpcQueue.schedule(() =>
+          this.connection.sendRawTransaction(raw, {
+            skipPreflight: false
+          })
+        );
+        await this.rpcQueue.schedule(() => this.connection.confirmTransaction(signature, "confirmed"));
         return signature;
       } catch (err) {
         lastError = err as Error;
@@ -694,6 +736,54 @@ function toOpenOrder(
     price: formatAmount(priceBn, quoteToken.decimals),
     size: formatAmount(sizeBase, baseToken.decimals),
     status
+  };
+}
+
+function toFilledOrder(
+  order: TriggerOrder,
+  tokensByMint: Record<string, TokenInfo>,
+  quoteSymbols: Set<string>
+): { orderId: string; side: "buy" | "sell"; price: string; size: string; txSig?: string } | null {
+  const orderId = extractOrderId(order);
+  const inputMint = order.inputMint;
+  const outputMint = order.outputMint;
+  if (!orderId || !inputMint || !outputMint) {
+    return null;
+  }
+  const baseToken = resolveBaseToken(tokensByMint, quoteSymbols, inputMint, outputMint);
+  const quoteToken = resolveQuoteToken(tokensByMint, quoteSymbols, inputMint, outputMint);
+  const side = inputMint === baseToken.mint ? "sell" : "buy";
+
+  const originalMaking = toBn(order.rawMakingAmount ?? order.makingAmount);
+  const originalTaking = toBn(order.rawTakingAmount ?? order.takingAmount);
+  const remainingMaking = toBn(order.rawRemainingMakingAmount ?? order.remainingMakingAmount ?? "0");
+  const remainingTaking = toBn(order.rawRemainingTakingAmount ?? order.remainingTakingAmount ?? "0");
+  if (!originalMaking || !originalTaking || originalMaking.isZero() || originalTaking.isZero()) {
+    return null;
+  }
+
+  const statusRaw = `${order.orderStatus ?? order.status ?? ""}`.toLowerCase();
+  const isFilledStatus =
+    statusRaw.includes("complete") ||
+    statusRaw.includes("fill") ||
+    ((remainingMaking?.isZero() ?? false) && (remainingTaking?.isZero() ?? false));
+  if (!isFilledStatus) {
+    return null;
+  }
+
+  const sizeBase = side === "sell" ? originalMaking : originalTaking;
+  const priceBn =
+    side === "sell"
+      ? originalTaking.mul(TEN.pow(new BN(baseToken.decimals))).div(originalMaking)
+      : originalMaking.mul(TEN.pow(new BN(baseToken.decimals))).div(originalTaking);
+
+  const txSig = order.closeTx ?? order.trades?.[0]?.txId;
+  return {
+    orderId,
+    side,
+    price: formatAmount(priceBn, quoteToken.decimals),
+    size: formatAmount(sizeBase, baseToken.decimals),
+    txSig: txSig || undefined
   };
 }
 

@@ -4,6 +4,7 @@ import type {
   BotCommand,
   BotConfig,
   BotState,
+  Intent,
   FillEvent,
   NormalizedEvent,
   OrderEvent,
@@ -51,6 +52,7 @@ export class BotRunnerService {
   private lastSnapshotAt = new Map<string, number>();
   private walletTxQueue = Promise.resolve();
   private processedTxs = new Set<string>();
+  private evaluatingBots = new Set<string>();
   private heartbeatTimer?: NodeJS.Timeout;
   private scheduleTimer?: NodeJS.Timeout;
   private reconcileTimer?: NodeJS.Timeout;
@@ -271,6 +273,11 @@ export class BotRunnerService {
   }
 
   private async evaluateBot(botId: string) {
+    if (this.evaluatingBots.has(botId)) {
+      return;
+    }
+    this.evaluatingBots.add(botId);
+    try {
     const state = this.bots.getState(botId);
     const config = this.bots.getConfig(botId);
     if (!state || !config || state.status !== "running") {
@@ -297,23 +304,51 @@ export class BotRunnerService {
     }
 
     const openOrders = await this.persistence.listOpenOrders(botId);
+    const strategyOrders: StrategyOrder[] = openOrders.map((order) => ({
+      id: order.id,
+      externalId: order.externalId ?? undefined,
+      side: order.side as "buy" | "sell",
+      price: order.price.toString(),
+      size: order.size.toString(),
+      status: order.status as "new" | "open" | "partial" | "filled" | "canceled" | "rejected"
+    }));
+    if (!isPerpsBot(config)) {
+      const venueOrders = await this.fetchVenueOpenOrders(botId, config);
+      if (!venueOrders) {
+        return;
+      }
+      if (config.grid?.gridCount && venueOrders.length >= config.grid.gridCount) {
+        console.warn("[bot-runner] skipping placement: venue open orders exceed grid count", {
+          botId,
+          market: config.market,
+          openOnVenue: venueOrders.length,
+          gridCount: config.grid.gridCount
+        });
+        return;
+      }
+      const venueStrategyOrders = venueOrders.map((order) => ({
+        id: order.externalId ?? order.orderId ?? randomUUID(),
+        externalId: order.externalId ?? order.orderId ?? undefined,
+        side: order.side,
+        price: order.price ?? "0",
+        size: order.size ?? "0",
+        status: (order.status ?? "open") as StrategyOrder["status"]
+      }));
+      strategyOrders.splice(0, strategyOrders.length, ...mergeStrategyOrders(strategyOrders, venueStrategyOrders));
+    }
     const intents = await this.intents.run(strategy, {
       botConfig: config,
       botState: state,
       market,
-      openOrders: openOrders.map((order) => ({
-        id: order.id,
-        externalId: order.externalId ?? undefined,
-        side: order.side as "buy" | "sell",
-        price: order.price.toString(),
-        size: order.size.toString(),
-        status: order.status as "new" | "open" | "partial" | "filled" | "canceled" | "rejected"
-      }))
+      openOrders: strategyOrders
     });
 
+    const spotFiltered = !isPerpsBot(config)
+      ? filterSpotIntents(intents, config, this.walletBalances)
+      : intents;
     const decision = isPerpsBot(config)
-      ? this.perpsRisk.evaluate(state.risk, intents, botId, market, this.perpsRiskConfig)
-      : this.spotRisk.evaluate(state.risk, intents, botId);
+      ? this.perpsRisk.evaluate(state.risk, spotFiltered, botId, market, this.perpsRiskConfig)
+      : this.spotRisk.evaluate(state.risk, spotFiltered, botId);
     const updatedState = this.bots.updateRisk(botId, decision.riskState);
     await this.bus.setCache(CACHE_KEYS.bot(botId), updatedState);
 
@@ -335,6 +370,9 @@ export class BotRunnerService {
         await this.bus.publishBotEvent(event);
         await this.persistence.logEvent(event, { market: config.market, runId: state.runId });
       }
+    }
+    } finally {
+      this.evaluatingBots.delete(botId);
     }
   }
 
@@ -653,7 +691,7 @@ export class BotRunnerService {
   private buildAccountSnapshot(walletId: string) {
     const balances = Array.from(this.walletBalances.entries()).map(([mint, entry]) => {
       const token = getTokenByMint(mint, this.config.solanaCluster);
-      const symbol = token?.symbol ?? null;
+      const symbol = mint === "SOL" ? "SOL" : token?.symbol ?? null;
       const amount = entry.balance;
       const priceUsd = resolveUsdPrice(symbol, this.market);
       const numericAmount = Number(amount);
@@ -685,6 +723,26 @@ export class BotRunnerService {
       equity: Number.isFinite(equity) ? equity.toFixed(2) : null,
       balances
     };
+  }
+
+  private async fetchVenueOpenOrders(botId: string, config: BotConfig) {
+    const connector = await this.getConnector(botId, config);
+    const attempts = 3;
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        return await connector.getOpenOrders(config.market);
+      } catch (err) {
+        lastError = err as Error;
+        await sleep(250 * (attempt + 1));
+      }
+    }
+    console.warn("[bot-runner] pre-trade open order fetch failed", {
+      botId,
+      market: config.market,
+      error: lastError?.message ?? "unknown error"
+    });
+    return null;
   }
 }
 
@@ -734,6 +792,100 @@ function resolveMarketSymbol(config: BotConfig) {
 function isPerpsBot(config: BotConfig) {
   const kind = config.kind ?? (config.venue === "drift_perps" ? "drift_perps" : "spot");
   return kind === "drift_perps";
+}
+
+type StrategyOrder = {
+  id: string;
+  externalId?: string;
+  side: "buy" | "sell";
+  price: string;
+  size: string;
+  status: "new" | "open" | "partial" | "filled" | "canceled" | "rejected";
+};
+
+function mergeStrategyOrders(left: StrategyOrder[], right: StrategyOrder[]) {
+  const seen = new Set<string>();
+  const merged: StrategyOrder[] = [];
+  for (const order of [...left, ...right]) {
+    const key =
+      order.externalId ?? `${order.side}:${order.price}:${order.size}:${order.status}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    merged.push(order);
+  }
+  return merged;
+}
+
+function filterSpotIntents(
+  intents: Intent[],
+  config: BotConfig,
+  walletBalances: Map<string, { balance: string }>
+) {
+  const grid = config.grid;
+  if (!grid || !config.market) {
+    return intents;
+  }
+  const [baseSymbol, quoteSymbol] = config.market.includes("/")
+    ? config.market.split("/")
+    : config.market.split("-");
+  const baseMint = baseSymbol ? TOKEN_MINTS[baseSymbol as keyof typeof TOKEN_MINTS]?.mint : undefined;
+  const quoteMint = quoteSymbol ? TOKEN_MINTS[quoteSymbol as keyof typeof TOKEN_MINTS]?.mint : undefined;
+  if (!baseMint || !quoteMint) {
+    return intents;
+  }
+  const baseBalance =
+    baseSymbol === "SOL"
+      ? Number(walletBalances.get(baseMint)?.balance ?? walletBalances.get("SOL")?.balance ?? 0)
+      : Number(walletBalances.get(baseMint)?.balance ?? 0);
+  const quoteBalance =
+    quoteSymbol === "SOL"
+      ? Number(walletBalances.get(quoteMint)?.balance ?? walletBalances.get("SOL")?.balance ?? 0)
+      : Number(walletBalances.get(quoteMint)?.balance ?? 0);
+  if (!Number.isFinite(baseBalance) || !Number.isFinite(quoteBalance)) {
+    return intents;
+  }
+  let remainingBase = baseBalance;
+  let remainingQuote = quoteBalance;
+  const maxBase = Number(grid.maxBaseBudget);
+  const maxQuote = Number(grid.maxQuoteBudget);
+  if (Number.isFinite(maxBase) && maxBase > 0) {
+    remainingBase = Math.min(remainingBase, maxBase);
+  }
+  if (Number.isFinite(maxQuote) && maxQuote > 0) {
+    remainingQuote = Math.min(remainingQuote, maxQuote);
+  }
+  const budgetEpsilon = 1e-9;
+  const filtered: Intent[] = [];
+  for (const intent of intents) {
+    if (intent.kind !== "place_limit_order") {
+      filtered.push(intent);
+      continue;
+    }
+    const size = Number(intent.size);
+    const price = Number(intent.price);
+    if (!Number.isFinite(size) || !Number.isFinite(price) || size <= 0 || price <= 0) {
+      continue;
+    }
+    if (intent.side === "buy") {
+      const quoteNeeded = size * price;
+      if (remainingQuote + budgetEpsilon >= quoteNeeded) {
+        remainingQuote -= quoteNeeded;
+        filtered.push(intent);
+      }
+      continue;
+    }
+    if (remainingBase + budgetEpsilon >= size) {
+      remainingBase -= size;
+      filtered.push(intent);
+    }
+  }
+  return filtered;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function resolveUsdPrice(symbol: string | null, market: MarketStateStore) {

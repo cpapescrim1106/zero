@@ -13,6 +13,7 @@ export interface MarketDataConfig {
   heliusSubscribeWallet: boolean;
   heliusSubscribeTokens: boolean;
   heliusTokenMintAllowlist?: string[];
+  balancePollIntervalMs: number;
   heartbeatIntervalMs: number;
   staleSeconds: number;
   pricePollIntervalMs: number;
@@ -87,6 +88,7 @@ export function loadConfig(env = process.env): MarketDataConfig {
     heliusTokenMintAllowlist: heliusTokenMintAllowlist.length
       ? heliusTokenMintAllowlist
       : undefined,
+    balancePollIntervalMs: Number(env.BALANCE_POLL_INTERVAL_MS ?? 30000),
     heartbeatIntervalMs: Number(env.HEARTBEAT_INTERVAL_MS ?? 5000),
     staleSeconds: Number(env.STALE_SECONDS ?? 30),
     pricePollIntervalMs: Number(env.PRICE_POLL_INTERVAL_MS ?? 15000),

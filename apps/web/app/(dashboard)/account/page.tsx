@@ -74,13 +74,13 @@ export default function AccountPage() {
   const allocationTotal = allocationRows.reduce((sum, row) => sum + row.numericUsd, 0);
 
   return (
-    <section className="flex flex-col gap-6">
-      <div className="flex flex-wrap items-center justify-between gap-4">
+    <section className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h3 className="text-xl font-semibold">Account</h3>
-          <p className="text-sm text-muted">Wallet equity, balances, and profit.</p>
+          <h3 className="text-lg font-semibold">Account</h3>
+          <p className="text-xs text-muted">Wallet equity, balances, and profit.</p>
         </div>
-        <div className="flex items-center gap-2 rounded-full border border-border bg-white/70 p-1 text-xs font-semibold text-text">
+        <div className="flex items-center gap-1.5 rounded-full border border-border bg-white/70 p-0.5 text-[11px] font-semibold text-text">
           {RANGE_OPTIONS.map((option) => (
             <button
               key={option.key}
@@ -88,8 +88,8 @@ export default function AccountPage() {
               onClick={() => setRangeKey(option.key)}
               className={
                 option.key === rangeKey
-                  ? "rounded-full bg-accent px-3 py-1 text-white"
-                  : "rounded-full px-3 py-1 text-muted hover:text-text"
+                  ? "rounded-full bg-accent px-2.5 py-0.5 text-white"
+                  : "rounded-full px-2.5 py-0.5 text-muted hover:text-text"
               }
             >
               {option.label}
@@ -98,21 +98,21 @@ export default function AccountPage() {
         </div>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         <MetricCard label="Equity" value={formatCurrency(totals.end)} hint="Latest snapshot" />
         <MetricCard label="Total profit" value={formatCurrency(totals.totalProfit)} hint={`Range ${range.label}`} />
         <MetricCard label="Net profit" value={formatCurrency(totals.netProfit)} hint="After fees" />
         <MetricCard label="Fees" value={formatCurrency(totals.fees)} hint="Estimated" />
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         <MetricCard label="Realized PnL" value={formatCurrency(totals.realized)} hint="Fills only" />
         <MetricCard label="Unrealized PnL" value={formatCurrency(totals.unrealized)} hint="Equity delta" />
         <MetricCard label="Start equity" value={formatCurrency(totals.start)} hint="Range baseline" />
         <MetricCard label="End equity" value={formatCurrency(totals.end)} hint="Range end" />
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid gap-3 lg:grid-cols-2">
         <Card title="Wallet equity">
           {snapshotsLoading ? (
             <ChartPlaceholder label="Loading snapshots..." />
@@ -131,7 +131,7 @@ export default function AccountPage() {
         </Card>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid gap-3 lg:grid-cols-2">
         <Card title="Balances">
           <BalancesTable balances={balances} />
         </Card>
@@ -151,16 +151,16 @@ export default function AccountPage() {
 
 function Card({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <div className="rounded-xl border border-border bg-panel/90 p-6 shadow-card">
-      <p className="text-xs uppercase tracking-[0.2em] text-muted">{title}</p>
-      <div className="mt-4">{children}</div>
+    <div className="rounded-xl border border-border bg-panel/90 p-4 shadow-card">
+      <p className="text-[10px] uppercase tracking-[0.2em] text-muted">{title}</p>
+      <div className="mt-3">{children}</div>
     </div>
   );
 }
 
 function ChartPlaceholder({ label }: { label: string }) {
   return (
-    <div className="flex h-40 items-center justify-center rounded-xl border border-dashed border-border bg-white/60 text-xs text-muted">
+    <div className="flex h-40 items-center justify-center rounded-xl border border-dashed border-border bg-white/60 text-[11px] text-muted">
       {label}
     </div>
   );
@@ -168,7 +168,7 @@ function ChartPlaceholder({ label }: { label: string }) {
 
 function EmptyChart({ label }: { label: string }) {
   return (
-    <div className="flex h-40 items-center justify-center rounded-xl border border-dashed border-border bg-white/60 text-xs text-muted">
+    <div className="flex h-40 items-center justify-center rounded-xl border border-dashed border-border bg-white/60 text-[11px] text-muted">
       {label}
     </div>
   );
@@ -179,13 +179,13 @@ function AllocationChart({ rows, total }: { rows: Array<ApiAccountBalance & { nu
     return <EmptyChart label="No priced balances yet." />;
   }
   return (
-    <div className="space-y-3">
+    <div className="space-y-2">
       {rows.map((row) => {
         const share = total > 0 ? ((row.numericUsd ?? 0) / total) * 100 : 0;
         const label = row.symbol ?? shortMint(row.mint);
         return (
           <div key={row.mint} className="space-y-1">
-            <div className="flex items-center justify-between text-xs text-muted">
+            <div className="flex items-center justify-between text-[11px] text-muted">
               <span className="uppercase tracking-[0.2em]">{label}</span>
               <span>{share.toFixed(1)}%</span>
             </div>
@@ -208,19 +208,19 @@ function BalancesTable({ balances }: { balances: ApiAccountBalance[] }) {
       <table className="w-full text-left text-xs">
         <thead className="border-b border-border text-[10px] uppercase tracking-[0.2em] text-muted">
           <tr>
-            <th className="px-4 py-3">Asset</th>
-            <th className="px-4 py-3">Amount</th>
-            <th className="px-4 py-3">Price</th>
-            <th className="px-4 py-3 text-right">USD Value</th>
+            <th className="px-3 py-2">Asset</th>
+            <th className="px-3 py-2">Amount</th>
+            <th className="px-3 py-2">Price</th>
+            <th className="px-3 py-2 text-right">USD Value</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-border">
           {balances.map((balance) => (
             <tr key={balance.mint}>
-              <td className="px-4 py-3 font-medium">{balance.symbol ?? shortMint(balance.mint)}</td>
-              <td className="px-4 py-3">{balance.amount}</td>
-              <td className="px-4 py-3">{balance.priceUsd ? formatCurrency(Number(balance.priceUsd)) : "-"}</td>
-              <td className="px-4 py-3 text-right">
+              <td className="px-3 py-2 font-medium">{balance.symbol ?? shortMint(balance.mint)}</td>
+              <td className="px-3 py-2">{balance.amount}</td>
+              <td className="px-3 py-2">{balance.priceUsd ? formatCurrency(Number(balance.priceUsd)) : "-"}</td>
+              <td className="px-3 py-2 text-right">
                 {balance.usdValue ? formatCurrency(Number(balance.usdValue)) : "-"}
               </td>
             </tr>

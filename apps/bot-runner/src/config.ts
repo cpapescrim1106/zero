@@ -15,6 +15,7 @@ export interface BotRunnerConfig {
   jupiterMinOrderUsd: number;
   heartbeatIntervalMs: number;
   reconcileIntervalMs: number;
+  fillReconcileIntervalMs: number;
   snapshotIntervalMs: number;
   accountSnapshotIntervalMs: number;
   staleSeconds: number;
@@ -64,6 +65,7 @@ export function loadConfig(env = process.env): BotRunnerConfig {
     jupiterMinOrderUsd,
     heartbeatIntervalMs: Number(env.HEARTBEAT_INTERVAL_MS ?? 5000),
     reconcileIntervalMs: Number(env.RECONCILE_INTERVAL_MS ?? 120000),
+    fillReconcileIntervalMs: Number(env.FILL_RECONCILE_INTERVAL_MS ?? 30000),
     snapshotIntervalMs: Number(env.SNAPSHOT_INTERVAL_MS ?? 30000),
     accountSnapshotIntervalMs: Number(env.ACCOUNT_SNAPSHOT_INTERVAL_MS ?? 60000),
     staleSeconds: Number(env.STALE_SECONDS ?? 30),
