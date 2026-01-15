@@ -265,18 +265,6 @@ export default function BotsPage() {
     };
   }, [selectedBot]);
 
-  const chartSeries = useMemo(() => {
-    if (!rangeSeconds || priceHistory.length === 0) {
-      return priceHistory;
-    }
-    const end = Number(priceHistory[priceHistory.length - 1]?.time ?? 0);
-    if (!Number.isFinite(end) || end === 0) {
-      return priceHistory;
-    }
-    const start = end - rangeSeconds;
-    return priceHistory.filter((point) => Number(point.time) >= start);
-  }, [priceHistory, rangeSeconds]);
-
   const lastEventMessage = lastFill
     ? `${selectedBot?.name ?? ""} ${lastFill.order?.side ?? "fill"} ${formatQty(Number(lastFill.qty))} @ ${formatPrice(Number(lastFill.price))}`
     : selectedBot?.runtime?.message ?? "Idle";
@@ -434,7 +422,7 @@ export default function BotsPage() {
               <GridLevelsChart
                 orders={orderLevels}
                 midPrice={lastPrice ?? orderLevels[Math.floor(orderLevels.length / 2)]?.price}
-                priceSeries={chartSeries}
+                priceSeries={priceHistory}
                 height={620}
                 rangeSeconds={rangeSeconds}
                 yRangeMode={yRangeMode}

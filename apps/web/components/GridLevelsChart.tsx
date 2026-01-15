@@ -65,9 +65,9 @@ export default function GridLevelsChart({
     const aboveLines = above.slice(0, 2);
     const floor = belowLines.length ? belowLines[0] : minGrid;
     const ceiling = aboveLines.length ? aboveLines[aboveLines.length - 1] : maxGrid;
-
-    const rangeHalf = Math.max(mid - floor, ceiling - mid, mid * 0.001);
-    return { min: Math.max(0, mid - rangeHalf), max: mid + rangeHalf };
+    const span = Math.max(ceiling - floor, mid * 0.001);
+    const pad = span * 0.08;
+    return { min: Math.max(0, floor - pad), max: ceiling + pad };
   }, [orders, midPrice, priceSeries, yRangeMode]);
 
   const timeRange = useMemo(() => {
@@ -186,8 +186,6 @@ export default function GridLevelsChart({
         from: start as UTCTimestamp,
         to: end as UTCTimestamp
       });
-    } else {
-      chartRef.current?.timeScale().fitContent();
     }
   }, [priceSeries, rangeSeconds, timeRange]);
 
