@@ -21,6 +21,9 @@ export interface MarketDataConfig {
   jupiterPriceUrl: string;
   priceSource: "jupiter" | "coingecko" | "kraken";
   coingeckoPriceUrl: string;
+  pythEnabled: boolean;
+  pythWsUrl: string;
+  pythHttpUrl: string;
   perpsEnabled: boolean;
   perpsMarkets: string[];
   perpsPollIntervalMs: number;
@@ -64,6 +67,9 @@ export function loadConfig(env = process.env): MarketDataConfig {
   const heliusTokenMintAllowlist = parseCsv(env.HELIUS_TOKEN_MINTS);
   const perpsEnabled = parseBool(env.PERPS_ENABLED, true);
   const perpsMarkets = parseCsv(env.PERPS_MARKETS);
+  const pythEnabled = parseBool(env.PYTH_WS_ENABLED, true);
+  const pythWsUrl = env.PYTH_WS_URL ?? "wss://hermes.pyth.network/ws";
+  const pythHttpUrl = env.PYTH_HTTP_URL ?? "https://hermes.pyth.network";
 
   return {
     port: Number(env.PORT ?? 3002),
@@ -91,15 +97,18 @@ export function loadConfig(env = process.env): MarketDataConfig {
     balancePollIntervalMs: Number(env.BALANCE_POLL_INTERVAL_MS ?? 30000),
     heartbeatIntervalMs: Number(env.HEARTBEAT_INTERVAL_MS ?? 5000),
     staleSeconds: Number(env.STALE_SECONDS ?? 30),
-    pricePollIntervalMs: Number(env.PRICE_POLL_INTERVAL_MS ?? 15000),
+    pricePollIntervalMs: Number(env.PRICE_POLL_INTERVAL_MS ?? 2000),
     priceSymbols: (env.PRICE_POLL_SYMBOLS ?? "SOL")
       .split(",")
       .map((symbol) => symbol.trim())
       .filter(Boolean),
     jupiterPriceUrl: env.JUPITER_PRICE_URL ?? "https://price.jup.ag/v6/price",
-    priceSource: (env.PRICE_SOURCE ?? "coingecko") as "jupiter" | "coingecko" | "kraken",
+    priceSource: (env.PRICE_SOURCE ?? "jupiter") as "jupiter" | "coingecko" | "kraken",
     coingeckoPriceUrl:
       env.COINGECKO_PRICE_URL ?? "https://api.coingecko.com/api/v3/simple/price",
+    pythEnabled,
+    pythWsUrl,
+    pythHttpUrl,
     perpsEnabled,
     perpsMarkets,
     perpsPollIntervalMs: Number(env.PERPS_POLL_INTERVAL_MS ?? 30000)

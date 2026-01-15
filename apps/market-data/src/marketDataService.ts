@@ -5,12 +5,14 @@ import { DriftPerpsPoller } from "./driftPerpsPoller";
 import { HeliusProvider } from "./heliusProvider";
 import { PerpsMarketRegistry } from "./perpsMarketRegistry";
 import { PricePoller } from "./pricePoller";
+import { PythPriceService } from "./pythPriceService";
 import { RedisPublisher } from "./redisPublisher";
 
 export class MarketDataService {
   private publisher: RedisPublisher;
   private helius?: HeliusProvider;
   private pricePoller: PricePoller;
+  private pythPriceService?: PythPriceService;
   private perpsRegistry?: PerpsMarketRegistry;
   private perpsPoller?: DriftPerpsPoller;
   private lastEventAt = Date.now();
@@ -49,6 +51,21 @@ export class MarketDataService {
       coingeckoPriceUrl: config.coingeckoPriceUrl,
       onEvent: (event) => void this.handleEvent(event)
     });
+    if (config.pythEnabled && config.priceSymbols.length > 0) {
+      this.pythPriceService = new PythPriceService({
+        httpUrl: config.pythHttpUrl,
+        wsUrl: config.pythWsUrl,
+        symbols: config.priceSymbols,
+        onEvent: (event) => void this.handleEvent(event),
+        onLog: (message, context) => {
+          if (context) {
+            console.log("[pyth]", message, context);
+          } else {
+            console.log("[pyth]", message);
+          }
+        }
+      });
+    }
     if (config.perpsEnabled) {
       this.perpsRegistry = new PerpsMarketRegistry(config.redisUrl, config.perpsMarkets);
       this.perpsPoller = new DriftPerpsPoller({
@@ -74,6 +91,13 @@ export class MarketDataService {
           });
         }, this.config.balancePollIntervalMs);
       }
+    }
+    if (this.pythPriceService) {
+      await this.pythPriceService.start().catch((err) => {
+        console.warn("[market-data] pyth ws failed; continuing with poller", {
+          error: (err as Error).message
+        });
+      });
     }
     this.pricePoller.start();
     if (this.perpsRegistry && this.perpsPoller) {
@@ -101,6 +125,9 @@ export class MarketDataService {
       clearInterval(this.balancePoller);
     }
     this.pricePoller.stop();
+    if (this.pythPriceService) {
+      await this.pythPriceService.stop();
+    }
     if (this.perpsPoller) {
       await this.perpsPoller.stop();
     }
