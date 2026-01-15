@@ -113,6 +113,7 @@ export default function BotsPage() {
   const [priceHistory, setPriceHistory] = useState<Array<{ time: import("lightweight-charts").UTCTimestamp; value: number }>>([]);
   const lastPriceRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number>(0);
+  const pythActiveRef = useRef(false);
 
   const fillSeries = useMemo(() => {
     return fills
@@ -142,6 +143,9 @@ export default function BotsPage() {
     if (!selectedId || lastPrice === null) {
       return;
     }
+    if (pythActiveRef.current) {
+      return;
+    }
     if (lastPriceRef.current !== null && lastPriceRef.current === lastPrice) {
       return;
     }
@@ -155,6 +159,82 @@ export default function BotsPage() {
       return next.slice(-120);
     });
   }, [lastPrice, selectedId]);
+
+  useEffect(() => {
+    if (!selectedBot) {
+      return;
+    }
+    const baseSymbol = getBaseSymbol(selectedBot.market);
+    if (!baseSymbol) {
+      return;
+    }
+    let active = true;
+    let socket: WebSocket | null = null;
+    const controller = new AbortController();
+    pythActiveRef.current = false;
+    let lastPublishTime = 0;
+    let lastPriceValue = 0;
+
+    const feedQuery = `Crypto.${baseSymbol.toUpperCase()}/USD`;
+    const lookupUrl = `https://hermes.pyth.network/v2/price_feeds?query=${encodeURIComponent(feedQuery)}`;
+
+    fetch(lookupUrl, { signal: controller.signal })
+      .then((res) => (res.ok ? res.json() : []))
+      .then((data) => {
+        if (!active) {
+          return;
+        }
+        const feedId = Array.isArray(data) ? data[0]?.id : null;
+        if (!feedId) {
+          return;
+        }
+        socket = new WebSocket("wss://hermes.pyth.network/ws");
+        socket.onopen = () => {
+          socket?.send(JSON.stringify({ type: "subscribe", ids: [feedId], verbose: true }));
+        };
+        socket.onmessage = (event) => {
+          if (!active) {
+            return;
+          }
+          let payload: any;
+          try {
+            payload = JSON.parse(event.data as string);
+          } catch {
+            return;
+          }
+          if (payload?.type !== "price_update") {
+            return;
+          }
+          const price = payload?.price_feed?.price?.price;
+          const expo = payload?.price_feed?.price?.expo;
+          const publishTime = payload?.price_feed?.price?.publish_time;
+          if (price === undefined || expo === undefined || publishTime === undefined) {
+            return;
+          }
+          const numericPrice = Number(price) * Math.pow(10, Number(expo));
+          if (!Number.isFinite(numericPrice)) {
+            return;
+          }
+          if (publishTime === lastPublishTime && numericPrice === lastPriceValue) {
+            return;
+          }
+          lastPublishTime = publishTime;
+          lastPriceValue = numericPrice;
+          pythActiveRef.current = true;
+          const time = Number(publishTime) as import("lightweight-charts").UTCTimestamp;
+          setPriceHistory((prev) => mergePriceSeries([{ time, value: numericPrice }], prev));
+        };
+      })
+      .catch(() => {});
+
+    return () => {
+      active = false;
+      controller.abort();
+      if (socket) {
+        socket.close();
+      }
+    };
+  }, [selectedBot]);
   const lastEventMessage = lastFill
     ? `${selectedBot?.name ?? ""} ${lastFill.order?.side ?? "fill"} ${formatQty(Number(lastFill.qty))} @ ${formatPrice(Number(lastFill.price))}`
     : selectedBot?.runtime?.message ?? "Idle";
@@ -664,6 +744,14 @@ function formatPercent(value: number | null) {
 function formatGridHealth(openOrders: number, gridCount: number | null) {
   const openLabel = gridCount === null ? `${openOrders}` : `${openOrders}/${gridCount}`;
   return `${openLabel} active`;
+}
+
+function getBaseSymbol(market?: string | null) {
+  if (!market) {
+    return null;
+  }
+  const [base] = market.includes("/") ? market.split("/") : market.split("-");
+  return base?.trim() || null;
 }
 
 function formatInventorySkew(base: number | null, quote: number | null, lastPrice: number | null) {
