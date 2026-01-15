@@ -119,6 +119,14 @@ export class BotManager {
     return state;
   }
 
+  updatePerformance(botId: string, updates: Partial<BotState>) {
+    const state = this.ensureState(botId);
+    Object.assign(state, updates);
+    state.lastEventAt = new Date().toISOString();
+    this.states.set(botId, state);
+    return state;
+  }
+
   setRunId(botId: string, runId?: string) {
     const state = this.ensureState(botId);
     state.runId = runId;

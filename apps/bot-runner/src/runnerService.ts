@@ -60,6 +60,7 @@ export class BotRunnerService {
   private perpsRiskTimer?: NodeJS.Timeout;
   private walletBalances = new Map<string, { balance: string; updatedAt: string }>();
   private lastAccountSnapshotAt = 0;
+  private lastFillReconcileAt = new Map<string, number>();
 
   constructor(private config: BotRunnerConfig) {
     this.bus = new RedisBus(config.redisUrl);
@@ -301,6 +302,11 @@ export class BotRunnerService {
     const strategy = this.getStrategy(config);
     if (!strategy) {
       return;
+    }
+
+    if (!isPerpsBot(config)) {
+      this.ensureSpotStartState(botId, config, market.lastPrice);
+      await this.reconcileSpotFills(botId, config);
     }
 
     const openOrders = await this.persistence.listOpenOrders(botId);
@@ -610,6 +616,190 @@ export class BotRunnerService {
     await this.persistence.logEvent(fillEvent, { market: matched.market, runId: matched.runId ?? undefined });
     await this.persistence.updateOrderStatus(matched.id, "filled", fillEvent.ts);
     await this.bus.publishBotEvent(fillEvent);
+    this.applySpotFillToState(matched.botId, fillEvent);
+  }
+
+  private async reconcileSpotFills(botId: string, config: BotConfig) {
+    const now = Date.now();
+    const last = this.lastFillReconcileAt.get(botId) ?? 0;
+    if (now - last < this.config.fillReconcileIntervalMs) {
+      return;
+    }
+    this.lastFillReconcileAt.set(botId, now);
+
+    const connector = await this.getConnector(botId, config);
+    if (!(connector instanceof JupiterLimitOrderConnector)) {
+      return;
+    }
+
+    let fills: Array<{ orderId: string; side: "buy" | "sell"; price: string; size: string; txSig?: string; filledAt?: string }>;
+    try {
+      fills = await connector.getRecentFills(config.market);
+    } catch (err) {
+      console.warn("[bot-runner] fill reconcile failed", { botId, error: (err as Error).message });
+      return;
+    }
+
+    const state = this.bots.getState(botId);
+    const needsRebuild = state
+      ? fills.length > 0 &&
+        state.startNav !== undefined &&
+        state.startPrice !== undefined &&
+        state.startBase !== undefined &&
+        state.startQuote !== undefined &&
+        (state.pnlRealized === "0" || state.pnlRealized === undefined) &&
+        (state.pnlUnrealized === "0" || state.pnlUnrealized === undefined) &&
+        state.inventoryBase === state.startBase &&
+        state.inventoryQuote === state.startQuote
+      : false;
+    if (needsRebuild) {
+      const sorted = [...fills].sort((a, b) => {
+        const aTime = a.filledAt ? Date.parse(a.filledAt) : 0;
+        const bTime = b.filledAt ? Date.parse(b.filledAt) : 0;
+        return aTime - bTime;
+      });
+      for (const fill of sorted) {
+        this.applySpotFillToStateValues(botId, fill.side, fill.price, fill.size);
+      }
+    }
+
+    for (const fill of fills) {
+      if (!fill.txSig) {
+        continue;
+      }
+      const existingFill = await this.persistence.findFillByTxSig(fill.txSig);
+      if (existingFill) {
+        if (fill.filledAt) {
+          const current = new Date(existingFill.filledAt).toISOString();
+          if (current !== fill.filledAt) {
+            await this.persistence.updateFillTimestamp(existingFill.id, fill.filledAt);
+          }
+        }
+        continue;
+      }
+      const order = await this.persistence.findOrderByExternalId(fill.orderId);
+      if (!order) {
+        console.warn("[bot-runner] fill reconcile missing order", { botId, orderId: fill.orderId });
+        continue;
+      }
+      const fillEvent: FillEvent = {
+        id: randomUUID(),
+        version: "v1",
+        kind: "fill",
+        ts: fill.filledAt ?? new Date().toISOString(),
+        source: "jupiter",
+        botId: order.botId,
+        orderId: order.id,
+        venue: order.venue,
+        externalId: order.externalId ?? undefined,
+        side: fill.side,
+        price: fill.price,
+        qty: fill.size,
+        txSig: fill.txSig
+      };
+      await this.persistence.logEvent(fillEvent, { market: order.market, runId: order.runId ?? undefined });
+      await this.persistence.updateOrderStatus(order.id, "filled", fillEvent.ts);
+      await this.bus.publishBotEvent(fillEvent);
+      this.applySpotFillToState(order.botId, fillEvent);
+    }
+  }
+
+  private ensureSpotStartState(botId: string, config: BotConfig, lastPrice?: string) {
+    const state = this.bots.getState(botId);
+    if (!state || state.startNav || !lastPrice) {
+      return;
+    }
+    const price = Number(lastPrice);
+    if (!Number.isFinite(price) || price <= 0) {
+      return;
+    }
+    const grid = config.grid;
+    const startBase = grid?.maxBaseBudget ? Number(grid.maxBaseBudget) : 0;
+    const startQuote = grid?.maxQuoteBudget ? Number(grid.maxQuoteBudget) : 0;
+    const safeBase = Number.isFinite(startBase) ? startBase : 0;
+    const safeQuote = Number.isFinite(startQuote) ? startQuote : 0;
+    const startNav = safeQuote + safeBase * price;
+    const equity = startNav;
+    const inventoryCostQuote = safeBase * price;
+    const next = this.bots.updatePerformance(botId, {
+      startPrice: price.toFixed(6),
+      startBase: safeBase.toFixed(6),
+      startQuote: safeQuote.toFixed(6),
+      startNav: Number.isFinite(startNav) ? startNav.toFixed(6) : undefined,
+      inventoryBase: safeBase.toFixed(6),
+      inventoryQuote: safeQuote.toFixed(6),
+      inventoryCostQuote: inventoryCostQuote.toFixed(6),
+      equity: Number.isFinite(equity) ? equity.toFixed(6) : undefined,
+      pnlRealized: "0",
+      pnlUnrealized: "0"
+    });
+    void this.bus.setCache(CACHE_KEYS.bot(botId), next);
+  }
+
+  private applySpotFillToState(botId: string, fill: FillEvent) {
+    this.applySpotFillToStateValues(botId, fill.side, fill.price, fill.qty);
+  }
+
+  private applySpotFillToStateValues(botId: string, side: "buy" | "sell", priceRaw: string, qtyRaw: string) {
+    const state = this.bots.getState(botId);
+    if (!state) {
+      return;
+    }
+    const price = Number(priceRaw);
+    const qty = Number(qtyRaw);
+    if (!Number.isFinite(price) || !Number.isFinite(qty) || qty <= 0 || price <= 0) {
+      return;
+    }
+    let base = Number(state.inventoryBase ?? 0);
+    let quote = Number(state.inventoryQuote ?? 0);
+    let costQuote = Number(state.inventoryCostQuote ?? 0);
+    let realized = Number(state.pnlRealized ?? 0);
+    if (!Number.isFinite(base)) {
+      base = 0;
+    }
+    if (!Number.isFinite(quote)) {
+      quote = 0;
+    }
+    if (!Number.isFinite(costQuote)) {
+      costQuote = 0;
+    }
+    if (!Number.isFinite(realized)) {
+      realized = 0;
+    }
+
+    if (side === "buy") {
+      base += qty;
+      const quoteDelta = price * qty;
+      quote -= quoteDelta;
+      costQuote += quoteDelta;
+    } else {
+      const avgCost = base > 0 ? costQuote / base : price;
+      base -= qty;
+      const quoteDelta = price * qty;
+      quote += quoteDelta;
+      realized += (price - avgCost) * qty;
+      costQuote -= avgCost * qty;
+    }
+
+    if (base < 0 || !Number.isFinite(base)) {
+      base = 0;
+    }
+    if (base === 0) {
+      costQuote = 0;
+    }
+
+    const lastPrice = Number(state.lastPrice ?? priceRaw);
+    const equity = Number.isFinite(lastPrice) ? quote + base * lastPrice : null;
+    const unrealized = Number.isFinite(lastPrice) ? base * lastPrice - costQuote : null;
+    const next = this.bots.updatePerformance(botId, {
+      inventoryBase: base.toFixed(6),
+      inventoryQuote: quote.toFixed(6),
+      inventoryCostQuote: costQuote.toFixed(6),
+      pnlRealized: realized.toFixed(6),
+      pnlUnrealized: unrealized !== null ? unrealized.toFixed(6) : state.pnlUnrealized,
+      equity: equity !== null ? equity.toFixed(6) : state.equity
+    });
+    void this.bus.setCache(CACHE_KEYS.bot(botId), next);
   }
 
   private maybeSnapshot(state: BotState) {

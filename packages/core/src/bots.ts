@@ -144,8 +144,13 @@ export interface BotState {
   venue: string;
   scheduleActive?: boolean;
   lastPrice?: string;
+  startNav?: string;
+  startPrice?: string;
+  startBase?: string;
+  startQuote?: string;
   inventoryBase?: string;
   inventoryQuote?: string;
+  inventoryCostQuote?: string;
   pnlUnrealized?: string;
   pnlRealized?: string;
   equity?: string;

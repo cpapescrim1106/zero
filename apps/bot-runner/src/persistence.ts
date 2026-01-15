@@ -274,6 +274,23 @@ export class Persistence {
     return Boolean(existing);
   }
 
+  async findFillByTxSig(txSig: string) {
+    if (!this.prisma) {
+      return null;
+    }
+    return this.prisma.fill.findFirst({ where: { txSig } });
+  }
+
+  async updateFillTimestamp(id: string, filledAt: string) {
+    if (!this.prisma) {
+      return;
+    }
+    await this.prisma.fill.update({
+      where: { id },
+      data: { filledAt: new Date(filledAt) }
+    });
+  }
+
   async updateOrderStatus(orderId: string, status: string, ts?: string) {
     if (!this.prisma) {
       return;

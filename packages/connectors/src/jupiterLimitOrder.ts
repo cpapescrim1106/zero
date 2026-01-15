@@ -64,6 +64,7 @@ type TriggerOrder = {
     rawInputAmount?: string;
     rawOutputAmount?: string;
     action?: string;
+    confirmedAt?: string;
   }>;
 };
 
@@ -80,6 +81,7 @@ export class JupiterLimitOrderConnector implements ExecutionConnector {
   private apiKey?: string;
   private computeUnitPrice: "auto" | string;
   private apiQueue: RequestQueue;
+  private rpcQueue: RequestQueue;
   private apiMinIntervalMs: number;
   private minOrderUsd: number;
 
@@ -99,6 +101,7 @@ export class JupiterLimitOrderConnector implements ExecutionConnector {
     const apiRps = Number.isFinite(config.apiRps) && (config.apiRps ?? 0) > 0 ? (config.apiRps as number) : 1;
     this.apiMinIntervalMs = Math.ceil(1000 / apiRps);
     this.apiQueue = new RequestQueue(apiRps);
+    this.rpcQueue = new RequestQueue(apiRps);
     this.minOrderUsd =
       Number.isFinite(config.minOrderUsd) && (config.minOrderUsd ?? 0) > 0
         ? (config.minOrderUsd as number)
@@ -290,7 +293,7 @@ export class JupiterLimitOrderConnector implements ExecutionConnector {
     return { ok: true, message: `openOrders=${orders.length}` };
   }
 
-  async getRecentFills(market: string): Promise<Array<{ orderId: string; side: "buy" | "sell"; price: string; size: string; txSig?: string }>> {
+  async getRecentFills(market: string): Promise<Array<{ orderId: string; side: "buy" | "sell"; price: string; size: string; txSig?: string; filledAt?: string }>> {
     const baseQuote = safeParseSymbol(market);
     let orders: TriggerOrder[] = [];
     if (baseQuote) {
@@ -315,8 +318,8 @@ export class JupiterLimitOrderConnector implements ExecutionConnector {
         )
       : orders;
     return filtered
-      .map((order) => toFilledOrder(order, this.tokensByMint, this.quoteSymbols))
-      .filter((order): order is { orderId: string; side: "buy" | "sell"; price: string; size: string; txSig?: string } =>
+      .flatMap((order) => toFilledOrders(order, this.tokensByMint, this.quoteSymbols))
+      .filter((order): order is { orderId: string; side: "buy" | "sell"; price: string; size: string; txSig?: string; filledAt?: string } =>
         Boolean(order)
       );
   }
@@ -739,27 +742,61 @@ function toOpenOrder(
   };
 }
 
-function toFilledOrder(
+function toFilledOrders(
   order: TriggerOrder,
   tokensByMint: Record<string, TokenInfo>,
   quoteSymbols: Set<string>
-): { orderId: string; side: "buy" | "sell"; price: string; size: string; txSig?: string } | null {
+): Array<{ orderId: string; side: "buy" | "sell"; price: string; size: string; txSig?: string; filledAt?: string }> {
   const orderId = extractOrderId(order);
   const inputMint = order.inputMint;
   const outputMint = order.outputMint;
   if (!orderId || !inputMint || !outputMint) {
-    return null;
+    return [];
   }
   const baseToken = resolveBaseToken(tokensByMint, quoteSymbols, inputMint, outputMint);
   const quoteToken = resolveQuoteToken(tokensByMint, quoteSymbols, inputMint, outputMint);
   const side = inputMint === baseToken.mint ? "sell" : "buy";
+
+  const fills: Array<{ orderId: string; side: "buy" | "sell"; price: string; size: string; txSig?: string; filledAt?: string }> = [];
+  const trades = Array.isArray(order.trades) ? order.trades : [];
+  for (const trade of trades) {
+    const action = `${trade.action ?? ""}`.toLowerCase();
+    if (action && !action.includes("fill")) {
+      continue;
+    }
+    const inputDecimals = inputMint === quoteToken.mint ? quoteToken.decimals : baseToken.decimals;
+    const outputDecimals = outputMint === quoteToken.mint ? quoteToken.decimals : baseToken.decimals;
+    const inputAmount = parseTradeAmount(trade.inputAmount, trade.rawInputAmount, inputDecimals);
+    const outputAmount = parseTradeAmount(trade.outputAmount, trade.rawOutputAmount, outputDecimals);
+    const input = Number(inputAmount);
+    const output = Number(outputAmount);
+    if (!Number.isFinite(input) || !Number.isFinite(output) || input <= 0 || output <= 0) {
+      continue;
+    }
+    const price = side === "sell" ? output / input : input / output;
+    const size = side === "sell" ? input : output;
+    if (!Number.isFinite(price) || !Number.isFinite(size)) {
+      continue;
+    }
+    fills.push({
+      orderId,
+      side,
+      price: price.toFixed(6),
+      size: size.toFixed(6),
+      txSig: trade.txId,
+      filledAt: trade.confirmedAt ?? undefined
+    });
+  }
+  if (fills.length > 0) {
+    return fills;
+  }
 
   const originalMaking = toBn(order.rawMakingAmount ?? order.makingAmount);
   const originalTaking = toBn(order.rawTakingAmount ?? order.takingAmount);
   const remainingMaking = toBn(order.rawRemainingMakingAmount ?? order.remainingMakingAmount ?? "0");
   const remainingTaking = toBn(order.rawRemainingTakingAmount ?? order.remainingTakingAmount ?? "0");
   if (!originalMaking || !originalTaking || originalMaking.isZero() || originalTaking.isZero()) {
-    return null;
+    return [];
   }
 
   const statusRaw = `${order.orderStatus ?? order.status ?? ""}`.toLowerCase();
@@ -768,7 +805,7 @@ function toFilledOrder(
     statusRaw.includes("fill") ||
     ((remainingMaking?.isZero() ?? false) && (remainingTaking?.isZero() ?? false));
   if (!isFilledStatus) {
-    return null;
+    return [];
   }
 
   const sizeBase = side === "sell" ? originalMaking : originalTaking;
@@ -778,13 +815,16 @@ function toFilledOrder(
       : originalMaking.mul(TEN.pow(new BN(baseToken.decimals))).div(originalTaking);
 
   const txSig = order.closeTx ?? order.trades?.[0]?.txId;
-  return {
+  return [
+    {
     orderId,
     side,
     price: formatAmount(priceBn, quoteToken.decimals),
     size: formatAmount(sizeBase, baseToken.decimals),
-    txSig: txSig || undefined
-  };
+    txSig: txSig || undefined,
+    filledAt: undefined
+    }
+  ];
 }
 
 function toBn(value?: string): BN | null {
@@ -805,6 +845,20 @@ function outAmountIsQuote(side: "buy" | "sell") {
 function isStableSymbol(symbol: string) {
   const normalized = symbol.toUpperCase();
   return normalized === "USDC" || normalized === "USDT";
+}
+
+function parseTradeAmount(amount?: string, rawAmount?: string, decimals = 0) {
+  if (amount) {
+    return amount;
+  }
+  if (!rawAmount) {
+    return "";
+  }
+  const parsed = toBn(rawAmount);
+  if (!parsed) {
+    return "";
+  }
+  return formatAmount(parsed, decimals);
 }
 
 function isBlockhashError(err: Error) {
