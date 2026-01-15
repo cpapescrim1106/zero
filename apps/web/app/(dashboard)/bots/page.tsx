@@ -110,6 +110,7 @@ export default function BotsPage() {
     readNumber(botStateData?.state?.inventoryQuote),
     lastPrice
   );
+  const [rangeSeconds, setRangeSeconds] = useState<number | null>(300);
   const [priceHistory, setPriceHistory] = useState<Array<{ time: import("lightweight-charts").UTCTimestamp; value: number }>>([]);
   const lastPriceRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number>(0);
@@ -380,7 +381,15 @@ export default function BotsPage() {
         </div>
 
         <div className="flex h-full flex-col rounded border border-border bg-panel/80 p-2">
-          <p className="mb-1 text-[10px] uppercase tracking-[0.2em] text-muted">Grid levels</p>
+          <div className="mb-1 flex items-center justify-between">
+            <p className="text-[10px] uppercase tracking-[0.2em] text-muted">Grid levels</p>
+            <div className="flex items-center gap-1 text-[10px] text-muted">
+              <ChartRangeButton label="1m" active={rangeSeconds === 60} onClick={() => setRangeSeconds(60)} />
+              <ChartRangeButton label="5m" active={rangeSeconds === 300} onClick={() => setRangeSeconds(300)} />
+              <ChartRangeButton label="15m" active={rangeSeconds === 900} onClick={() => setRangeSeconds(900)} />
+              <ChartRangeButton label="All" active={rangeSeconds === null} onClick={() => setRangeSeconds(null)} />
+            </div>
+          </div>
           {selectedBot ? (
             orderLevels.length > 0 ? (
               <GridLevelsChart
@@ -388,6 +397,10 @@ export default function BotsPage() {
                 midPrice={lastPrice ?? orderLevels[Math.floor(orderLevels.length / 2)]?.price}
                 priceSeries={priceHistory}
                 height={620}
+                rangeSeconds={rangeSeconds}
+                showTimeScale
+                rightOffset={6}
+                barSpacing={7}
               />
             ) : (
               <div className="flex flex-1 items-center justify-center rounded border border-border bg-white/60 text-[11px] text-muted">
@@ -528,6 +541,28 @@ function MetricTile({ label, value }: { label: string; value: React.ReactNode })
       <span className="text-[10px] uppercase tracking-[0.2em] text-muted">{label}</span>
       <span className="text-xs font-semibold text-text">{value}</span>
     </div>
+  );
+}
+
+function ChartRangeButton({
+  label,
+  active,
+  onClick
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] ${
+        active ? "border-slate-300 bg-white/80 text-text" : "border-border bg-white/60 text-muted"
+      }`}
+    >
+      {label}
+    </button>
   );
 }
 

@@ -15,6 +15,10 @@ export interface GridLevelsChartProps {
   height?: number;
   compact?: boolean;
   priceSeries?: Array<{ time: UTCTimestamp; value: number }>;
+  rangeSeconds?: number | null;
+  showTimeScale?: boolean;
+  rightOffset?: number;
+  barSpacing?: number;
   className?: string;
 }
 
@@ -24,6 +28,10 @@ export default function GridLevelsChart({
   height = 360,
   compact = false,
   priceSeries = [],
+  rangeSeconds = null,
+  showTimeScale = false,
+  rightOffset = 4,
+  barSpacing = 8,
   className
 }: GridLevelsChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -84,8 +92,12 @@ export default function GridLevelsChart({
             horzLines: { color: "rgba(148, 163, 184, 0.24)" }
           },
       timeScale: {
-        visible: false,
-        borderVisible: false
+        visible: showTimeScale && !compact,
+        borderVisible: showTimeScale && !compact,
+        rightOffset,
+        barSpacing,
+        timeVisible: true,
+        secondsVisible: true
       },
       rightPriceScale: {
         visible: !compact,
@@ -128,7 +140,7 @@ export default function GridLevelsChart({
       observer.disconnect();
       chart.remove();
     };
-  }, [compact, height]);
+  }, [barSpacing, compact, height, rightOffset, showTimeScale]);
 
   useEffect(() => {
     if (!rangeSeriesRef.current) {
@@ -156,8 +168,17 @@ export default function GridLevelsChart({
           ]
         : priceSeries;
     priceSeriesRef.current.setData(data);
-    chartRef.current?.timeScale().fitContent();
-  }, [priceSeries, timeRange]);
+    if (rangeSeconds && rangeSeconds > 0) {
+      const end = timeRange.end;
+      const start = Math.max(timeRange.start, end - rangeSeconds);
+      chartRef.current?.timeScale().setVisibleRange({
+        from: start as UTCTimestamp,
+        to: end as UTCTimestamp
+      });
+    } else {
+      chartRef.current?.timeScale().fitContent();
+    }
+  }, [priceSeries, rangeSeconds, timeRange]);
 
   useEffect(() => {
     if (!rangeSeriesRef.current) {
